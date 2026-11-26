@@ -23,11 +23,35 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      # Homebrew no longer ships x86_64 bottles, so libmpv comes from MacPorts
+      # and is bundled into the .app (users don't need to install mpv).
+      - name: Install MacPorts, libmpv and dylibbundler
+        run: |
+          curl -fsSLO https://github.com/macports/macports-base/releases/download/v2.12.7/MacPorts-2.12.7-15-Sequoia.pkg
+          sudo installer -pkg MacPorts-2.12.7-15-Sequoia.pkg -target /
+          export PATH="/opt/local/bin:/opt/local/sbin:$PATH"
+          sudo port -N selfupdate
+          sudo port -N install mpv +libmpv dylibbundler
+          ls -l /opt/local/lib/libmpv*.dylib
+
       - name: Build and package
         run: |
+          export PATH="/opt/local/bin:$PATH"
           bundle=$(bash packaging/macos/build-app.sh)
           lipo -archs "$bundle/Contents/MacOS/streamtube"
           test "$(lipo -archs "$bundle/Contents/MacOS/streamtube")" = x86_64
+          fw="$bundle/Contents/Frameworks"
+          mkdir -p "$fw"
+          cp -L /opt/local/lib/libmpv.2.dylib "$fw/"
+          chmod u+w "$fw/libmpv.2.dylib"
+          install_name_tool -id @loader_path/libmpv.2.dylib "$fw/libmpv.2.dylib"
+          dylibbundler -of -b -x "$fw/libmpv.2.dylib" -d "$fw" -p @loader_path/
+          echo "Bundled libraries:"; ls "$fw" | wc -l; du -sh "$fw"
+          if otool -L "$fw"/*.dylib | grep -q '/opt/local'; then
+            echo "Unbundled /opt/local references remain:"; otool -L "$fw"/*.dylib | grep '/opt/local'; exit 1
+          fi
+          codesign --force --deep --sign - "$bundle"
+          codesign --verify --deep --strict "$bundle"
           version=$(cargo metadata --format-version 1 --no-deps --locked | plutil -extract packages.0.version raw -o - -)
           echo "VERSION=$version" >> "$GITHUB_ENV"
           ditto -c -k --sequesterRsrc --keepParent "$bundle" "dist/StreamTube-$version-macos-x86_64-UNOFFICIAL.zip"
@@ -47,4 +71,4 @@ jobs:
           gh release create "$tag" dist/*-macos-x86_64-UNOFFICIAL.zip \
             --target "$GITHUB_SHA" --prerelease \
             --title "Stream Tube ${VERSION} — macOS Intel (unofficial)" \
-            --notes "Unofficial x86_64 build for Intel Macs. Requires: brew install mpv. Not notarised: right-click → Open on first launch."
+            --notes "Unofficial x86_64 build for Intel Macs. libmpv is bundled, nothing else to install (yt-dlp optional, for downloads). Not notarised: right-click → Open on first launch."
