@@ -50,8 +50,13 @@ jobs:
           if otool -L "$fw"/*.dylib | grep -q '/opt/local'; then
             echo "Unbundled /opt/local references remain:"; otool -L "$fw"/*.dylib | grep '/opt/local'; exit 1
           fi
+          install_name_tool -add_rpath /usr/lib/swift "$fw/libmpv.2.dylib" 2>/dev/null || true
           codesign --force --deep --sign - "$bundle"
           codesign --verify --deep --strict "$bundle"
+          # Smoke test: load the bundled libmpv with MacPorts hidden
+          sudo mv /opt/local /opt/local.hidden
+          /usr/bin/python3 -c "import ctypes,sys; l=ctypes.CDLL(sys.argv[1]); v=l.mpv_client_api_version(); print('libmpv client API', v>>16, v&0xffff); h=l.mpv_create(); assert h; print('mpv_create OK')" "$fw/libmpv.2.dylib"
+          sudo mv /opt/local.hidden /opt/local
           version=$(cargo metadata --format-version 1 --no-deps --locked | plutil -extract packages.0.version raw -o - -)
           echo "VERSION=$version" >> "$GITHUB_ENV"
           ditto -c -k --sequesterRsrc --keepParent "$bundle" "dist/StreamTube-$version-macos-x86_64-UNOFFICIAL.zip"
