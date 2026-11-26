@@ -50,7 +50,19 @@ jobs:
           if otool -L "$fw"/*.dylib | grep -q '/opt/local'; then
             echo "Unbundled /opt/local references remain:"; otool -L "$fw"/*.dylib | grep '/opt/local'; exit 1
           fi
-          install_name_tool -add_rpath /usr/lib/swift "$fw/libmpv.2.dylib" 2>/dev/null || true
+          # dylibbundler can rewrite several LC_RPATHs to the same value; dyld rejects duplicates
+          for lib in "$fw"/*.dylib; do
+            chmod u+w "$lib"
+            rpaths=$(otool -l "$lib" | awk '/cmd LC_RPATH/{getline; getline; print $2}')
+            for rp in $(printf '%s\n' "$rpaths" | sort | uniq -d); do
+              n=$(printf '%s\n' "$rpaths" | grep -cxF "$rp")
+              for ((i=1; i<n; i++)); do install_name_tool -delete_rpath "$rp" "$lib"; done
+            done
+          done
+          if ! otool -l "$fw/libmpv.2.dylib" | grep -q '/usr/lib/swift'; then
+            install_name_tool -add_rpath /usr/lib/swift "$fw/libmpv.2.dylib"
+          fi
+          otool -l "$fw/libmpv.2.dylib" | grep -A2 LC_RPATH
           codesign --force --deep --sign - "$bundle"
           codesign --verify --deep --strict "$bundle"
           # Smoke test: load the bundled libmpv with MacPorts hidden
