@@ -264,9 +264,8 @@ impl Player {
         let opts: Vec<(&str, &str)> = opts.into_iter().collect();
         let proxy = s.proxy.clone();
         let mut opts_owned: Vec<(String, String)> = opts.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect();
-        // Intel Macs (e.g. Ice Lake Iris Plus) hang inside VideoToolbox's VP9
-        // VTDecompressionSessionWaitForAsynchronousFrames on YouTube VP9 streams;
-        // restrict VideoToolbox hardware decode to H.264/HEVC while VP9/AV1 decode on CPU.
+        // Intel Iris Plus hangs inside VideoToolbox's VP9 decoder on frame-threaded
+        // YouTube VP9 streams; keep VideoToolbox for H.264/HEVC and decode VP9/AV1 on CPU
         #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
         opts_owned.push(("hwdec-codecs".into(), "h264,hevc".into()));
         // normal videos reach mpv through the app's local stream proxy, which already
@@ -627,15 +626,30 @@ impl Player {
         self.sb_prompt = prompt;
     }
 
+    fn save_local_progress(&mut self, force: bool) -> Option<&str> {
+        let video = self.video.as_ref()?;
+        if force || self.time > 0.0 {
+            // Periodic writes stay off the UI thread; final writes wait for the queue.
+            store::history_progress_queued(&video.id, self.time, self.duration, force);
+            self.last_progress_save = self.time;
+            Some(&video.id)
+        } else {
+            None
+        }
+    }
+
     pub fn save_progress(&mut self, force: bool) {
-        if let Some(v) = &self.video {
-            if force || self.time > 0.0 {
-                // the periodic save goes to a background thread; a forced one (switching
-                // videos, the end, quitting) is written before going on
-                store::history_progress_queued(&v.id, self.time, self.duration, force);
-                self.last_progress_save = self.time;
-                crate::api::web::report_progress(&v.id, self.time, !self.paused);
-            }
+        let time = self.time;
+        let playing = !self.paused;
+        if let Some(id) = self.save_local_progress(force) {
+            crate::api::web::report_progress(id, time, playing);
+        }
+    }
+
+    fn finish_progress(&mut self) {
+        let time = self.time;
+        if let Some(id) = self.save_local_progress(true) {
+            crate::api::web::report_stop(id, time);
         }
     }
 
@@ -651,13 +665,13 @@ impl Player {
     }
 
     pub fn play(&mut self, video: VideoItem, start: Option<f64>, cx: &mut Context<Self>) {
+        if cx.try_global::<crate::QuitRequested>().is_some() {
+            return;
+        }
         self.keyboard_feedback = None;
         self.preloaded_until = 0.0;
         self.set_playback_ready(false, cx);
-        self.save_progress(true);
-        if let Some(prev) = &self.video {
-            crate::api::web::report_stop(&prev.id, self.time);
-        }
+        self.finish_progress();
         let Some(mpv) = self.ensure_mpv(cx) else {
             self.video = Some(video);
             cx.notify();
@@ -687,9 +701,6 @@ impl Player {
         self.clear_frame(cx);
         let _ = mpv.command(&["stop"]);
         store::history_add(&video);
-        // with the browser sign-in, the video goes into the account's YouTube history
-        // and the position reported as it plays is where other devices resume
-        crate::api::web::report_start(&video.id, self.duration);
         let s = store::settings_snapshot();
         let id = video.id.clone();
         let resume = if start.is_some() {
@@ -701,6 +712,7 @@ impl Player {
         } else {
             None
         };
+        crate::api::web::report_start(&id, self.duration, resume.unwrap_or_default());
         cx.notify();
         if s.annotations {
             self.load_annotations(cx);
@@ -1313,10 +1325,7 @@ impl Player {
         self.keyboard_feedback = None;
         self.preloaded_until = 0.0;
         self.set_playback_ready(false, cx);
-        self.save_progress(true);
-        if let Some(v) = &self.video {
-            crate::api::web::report_stop(&v.id, self.time);
-        }
+        self.finish_progress();
         self.load_serial += 1;
         if let Some(m) = &self.mpv {
             let _ = m.command(&["stop"]);

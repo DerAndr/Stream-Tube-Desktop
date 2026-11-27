@@ -50,11 +50,8 @@ pub fn init_menu(main_window: AnyWindowHandle, cx: &mut App) {
     });
     cx.on_action(move |_: &Settings, cx| open_settings(main_window, Route::settings(), cx));
     cx.on_action(move |_: &Quit, cx| {
-        let _ = main_window.update(cx, |_, window, cx| {
-            crate::save_window_bounds(window);
-            crate::player::controller::player(cx).update(cx, |p, _| p.save_progress(true));
-        });
-        cx.quit();
+        let _ = main_window.update(cx, |_, window, _| crate::save_window_bounds(window));
+        crate::request_quit(cx);
     });
     cx.bind_keys([
         KeyBinding::new("cmd-,", Settings, None),

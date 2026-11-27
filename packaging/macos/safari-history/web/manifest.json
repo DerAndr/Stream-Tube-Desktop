@@ -1,0 +1,25 @@
+{
+  "manifest_version": 3,
+  "name": "Stream Tube Watch History",
+  "version": "0.3",
+  "description": "Connect YouTube in Safari to Stream Tube for watch history during this session.",
+  "permissions": [
+    "cookies",
+    "nativeMessaging"
+  ],
+  "host_permissions": [
+    "https://www.youtube.com/*"
+  ],
+  "background": {
+    "scripts": ["background.js"]
+  },
+  "action": {
+    "default_popup": "connect.html",
+    "default_icon": {
+      "48": "icon.png"
+    }
+  },
+  "icons": {
+    "48": "icon.png"
+  }
+}

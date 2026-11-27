@@ -875,37 +875,94 @@ impl AppView {
     }
 
     fn start_web_sign_in(&mut self, cx: &mut Context<Self>) {
-        use std::sync::atomic::{AtomicBool, Ordering};
-        if let Some(c) = self.web_login.cancel.take() {
-            c.store(true, Ordering::Relaxed);
+        self.reset_web_sign_in();
+        let Some((browser, executable)) = crate::api::web::find_browser() else {
+            #[cfg(target_os = "macos")]
+            if crate::api::safari::available() {
+                self.start_safari_sign_in(cx);
+                return;
+            }
+            self.web_login.error = Some(
+                "YouTube watch history sign-in requires Chrome, Edge, Brave or Chromium. Install a supported browser, then choose Try again."
+                    .into(),
+            );
+            cx.notify();
+            return;
+        };
+        self.run_web_sign_in(browser, move |cancel| crate::api::web::browser_sign_in(executable, cancel), || {}, cx);
+    }
+
+    #[cfg(target_os = "macos")]
+    fn start_safari_sign_in(&mut self, cx: &mut Context<Self>) {
+        use crate::api::safari::Pending;
+
+        self.reset_web_sign_in();
+        let pending = match Pending::new() {
+            Ok(pending) => pending,
+            Err(_) => {
+                self.web_login.error = Some("Couldn't start the Safari connection. Please try again.".into());
+                cx.notify();
+                return;
+            }
+        };
+        let request = pending.request();
+        self.run_web_sign_in(
+            "Safari".into(),
+            move |cancel| {
+                Pending::open_safari()?;
+                pending.wait(&cancel)
+            },
+            move || request.notify_extension(),
+            cx,
+        );
+    }
+
+    fn reset_web_sign_in(&mut self) {
+        if let Some(cancel) = self.web_login.cancel.take() {
+            cancel.store(true, std::sync::atomic::Ordering::Release);
         }
         self.web_login.attempt += 1;
+        self.dialog = Some(Dialog::WebSignIn);
+        self.web_login.error = None;
+        self.web_login.browser = None;
+    }
+
+    fn run_web_sign_in(
+        &mut self,
+        browser: String,
+        connect: impl FnOnce(Arc<std::sync::atomic::AtomicBool>) -> anyhow::Result<String> + Send + 'static,
+        heartbeat: impl Fn() + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
         let attempt = self.web_login.attempt;
         let cancel = Arc::new(AtomicBool::new(false));
         self.web_login.cancel = Some(cancel.clone());
-        self.web_login.error = None;
-        self.web_login.browser = crate::api::web::browser_name();
-        self.dialog = Some(Dialog::WebSignIn);
+        self.web_login.browser = Some(browser);
         cx.notify();
-        // closing the dialog any way at all stops the sign-in and closes the browser
+        // Closing the dialog ends the connection attempt.
         let watch = cancel.clone();
         cx.spawn(async move |this, cx| loop {
             cx.background_executor().timer(std::time::Duration::from_millis(700)).await;
             if watch.load(Ordering::Relaxed) {
                 return;
             }
-            let open = this.update(cx, |t, _| t.web_login.attempt == attempt && matches!(t.dialog, Some(Dialog::WebSignIn))).unwrap_or(false);
+            let open = this.update(cx, |t, _| {
+                t.web_login.attempt == attempt && t.web_login.cancel.is_some() && matches!(t.dialog, Some(Dialog::WebSignIn))
+            }).unwrap_or(false);
             if !open {
-                watch.store(true, Ordering::Relaxed);
+                watch.store(true, Ordering::Release);
                 return;
             }
+            heartbeat();
         })
         .detach();
         cx.spawn(async move |this, cx| {
             let c2 = cancel.clone();
-            let res = blocking(move || crate::api::web::browser_sign_in(c2)).await;
+            let res = blocking(move || connect(c2)).await;
             let _ = this.update(cx, |t, cx| {
-                if t.web_login.attempt != attempt {
+                if t.web_login.attempt != attempt || cancel.load(Ordering::Acquire) {
                     return;
                 }
                 t.web_login.cancel = None;
@@ -917,11 +974,7 @@ impl AppView {
                         toast(cx, tf!("Connected as {0}. What you watch now shows in your YouTube history.", name));
                         cx.refresh_windows();
                     }
-                    Err(e) => {
-                        if !cancel.load(Ordering::Relaxed) {
-                            t.web_login.error = Some(crate::ui::friendly_error(&format!("{e:#}")));
-                        }
-                    }
+                    Err(e) => t.web_login.error = Some(crate::ui::friendly_error(&format!("{e:#}"))),
                 }
                 cx.notify();
             });
@@ -931,7 +984,8 @@ impl AppView {
 
     fn render_web_sign_in(&self, cx: &mut Context<Self>) -> AnyElement {
         let p = pal(cx);
-        let browser = self.web_login.browser.clone().unwrap_or_else(|| "browser".into());
+        let browser = self.web_login.browser.as_deref().unwrap_or("browser");
+        let safari = browser == "Safari";
         let mut col = div().flex().flex_col().gap_4().child(
             div()
                 .flex()
@@ -956,20 +1010,28 @@ impl AppView {
             cx.notify();
         }));
         if let Some(err) = &self.web_login.error {
-            col = col.child(div().text_sm().text_color(p.text2).child(err.clone())).child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .child(cookies_link)
-                    .child(
-                        div()
-                            .flex()
-                            .gap_2()
-                            .child(cancel)
-                            .child(pill("wsi-retry", Some("refresh-cw"), "Try again", cx).on_click(cx.listener(|this, _, _, cx| this.start_web_sign_in(cx)))),
-                    ),
-            );
+            col = col
+                .child(div().text_sm().text_color(p.text2).child(err.clone()))
+                .when(self.web_login.browser.is_none() && !safari, |d| {
+                    d.child(div().flex().child(
+                        pill("wsi-chrome", Some("external-link"), "Get Chrome", cx)
+                            .on_click(|_, _, _| open_web("https://www.google.com/chrome/")),
+                    ))
+                })
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .child(cookies_link)
+                        .child(
+                            div()
+                                .flex()
+                                .gap_2()
+                                .child(cancel)
+                                .child(pill("wsi-retry", Some("refresh-cw"), "Try again", cx).on_click(cx.listener(|this, _, _, cx| this.start_web_sign_in(cx)))),
+                        ),
+                );
         } else {
             col = col
                 .child(
@@ -979,12 +1041,20 @@ impl AppView {
                         .gap_2()
                         .text_sm()
                         .text_color(p.text2)
-                        .child(tf!("Sign in to YouTube in the {0} window that opened. It closes by itself when you're done.", browser))
+                        .child(if safari {
+                            t("In Safari, sign in to YouTube. On the YouTube tab, open the Stream Tube watch-history extension for this build and choose Connect this YouTube session.").into()
+                        } else {
+                            tf!("Sign in to YouTube in the {0} window that opened. It closes by itself when you're done.", browser)
+                        })
                         .child(
                             div()
                                 .text_xs()
                                 .text_color(p.text3)
-                                .child(t("Videos you watch in Stream Tube then show in your YouTube history, and your phone and TV resume them where you stopped. The window uses its own empty profile, which is deleted afterwards.")),
+                                .child(if safari {
+                                    t("Enable the extension in Safari and grant it access to YouTube. The connection lasts until you quit Stream Tube or disconnect.")
+                                } else {
+                                    t("Videos you watch in Stream Tube then show in your YouTube history, and your phone and TV resume them where you stopped. The window uses its own empty profile, which is deleted afterwards.")
+                                }),
                         ),
                 )
                 .child(
@@ -996,6 +1066,13 @@ impl AppView {
                         .child(cancel),
                 )
                 .child(cookies_link);
+        }
+        #[cfg(target_os = "macos")]
+        if !safari && crate::api::safari::available() {
+            col = col.child(div().flex().child(
+                pill("wsi-safari", Some("globe"), "Use Safari", cx)
+                    .on_click(cx.listener(|this, _, _, cx| this.start_safari_sign_in(cx))),
+            ));
         }
         col.into_any_element()
     }
@@ -1123,10 +1200,10 @@ impl AppView {
                 .border_color(p.border)
                 .text_sm()
                 .font_weight(FontWeight::MEDIUM)
-                .text_color(p.link)
+                .text_color(p.accent_text)
                 .cursor_pointer()
                 .hover(move |s| s.bg(p.hover))
-                .child(icon("circle-user").size_5().text_color(p.link))
+                .child(icon("circle-user").size_5().text_color(p.accent_text))
                 .child(t("Sign in"))
                 .on_click(cx.listener(|this, _, _, cx| this.start_sign_in(cx)))
                 .into_any_element();

@@ -37,6 +37,7 @@ gpui-pre-macos = { version = "=0.3.12", default-features = false, features = ["r
 libc = "0.2"
 # also hides the pointer with the player controls
 objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["NSBundle", "NSDictionary", "NSObject", "NSString"] }
 objc2-app-kit = { version = "0.3", default-features = false, features = ["NSButton", "NSControl", "NSResponder", "NSView", "NSWindow"] }
 # GPU video path (src/player/gl_macos.rs): the pixel buffer type GPUI's surface() takes
 objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std"] }

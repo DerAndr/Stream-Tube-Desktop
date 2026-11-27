@@ -104,8 +104,10 @@ goes through libmpv, so it starts fast and scrolls smoothly even with big feeds.
 **Your data stays yours**
 - Subscriptions can live locally. The feed is built by fetching each channel directly, no account needed
 - Or sign in with your Google account to get your own Home feed, subscriptions, playlists, likes and subscribe button
+- The top-bar **Sign in** label and icon follow your selected accent. Their shade adjusts to maintain at least **4.5:1** contrast at rest and on hover in Light and Dark modes
 - Watch history and search history from your other devices sync in, with resume positions, and single entries can be removed
 - Connect your YouTube history (*Settings → General*) and it works the other way too: videos you watch in Stream Tube show up in your YouTube history, and your phone or TV resumes them where you stopped. You sign in once in a browser window with a fresh profile (Chrome, Edge, Brave or Chromium) that closes and is deleted afterwards, or load a `cookies.txt` file instead
+- On Apple Silicon, this branch also offers an [experimental Safari watch-history connection](#safari-watch-history-prototype) for a signed-in YouTube tab
 - History, watch later, favourites and playlists are stored in a local SQLite database, and you can pause or clear history at any time
 - Import from YouTube Takeout, NewPipe, FreeTube or OPML. Export to NewPipe JSON, YouTube CSV, OPML or a full backup
 
@@ -311,6 +313,23 @@ The [macOS build workflow](.github/workflows/macos.yml) builds and tests the
 Apple Silicon bundle on GitHub. It uploads a ZIP as a workflow artifact. Tagged
 release builds collect that ZIP in the project's draft release.
 
+#### Safari watch-history prototype
+
+For Safari-only watch-history sync, build the separate **Stream Tube Safari
+Prototype.app** with its embedded extension and follow the [build and connection
+instructions](packaging/macos/safari-history/README.md). You grant the extension
+access to `www.youtube.com` and choose when to connect a signed-in tab. The app
+keeps the Safari session in memory until you disconnect or quit.
+
+To test alongside older prototypes, [build a labelled Safari test copy](packaging/macos/safari-history/README.md#build-a-test-copy-alongside-older-prototypes).
+
+The player queues a final watch-time report when you close it or exit Stream
+Tube. [Opt-in playback diagnostics](packaging/macos/safari-history/README.md#playback-diagnostics)
+show playback timing, state and HTTP status. In the [verified quit and resume
+test](packaging/macos/safari-history/README.md#verified-quit-and-resume), Safari
+opened the video directly from YouTube Watch History at the reported position
+to the whole second.
+
 #### macOS release checklist
 
 The following foreground checks passed on Apple Silicon for **0.7.2-alpha**
@@ -329,14 +348,14 @@ and [Apple Silicon ZIP](https://github.com/wwessex/Stream-Tube-Desktop/actions/r
 #### Check hardware decoding
 
 Enable *Settings → Player → Hardware decoding*, restart Stream Tube, and play a
-video. Open *Stats for nerds* from the right-click menu or press Shift+I. A
-**Hardware decoding** value of `videotoolbox-copy` means libmpv is using Apple's
-VideoToolbox decoder. libmpv copies the decoded frames into system memory for
-the app's software render path. If a codec or format is unavailable in hardware,
-libmpv falls back to software decoding.
+video. Open *Stats for nerds* from the right-click menu or press Shift+I.
+**Hardware decoding** shows `videotoolbox` when libmpv keeps decoded frames on
+the GPU and `videotoolbox-copy` when it copies decoded frames to system memory
+for the software render path. libmpv falls back to software decoding when
+hardware decoding is unavailable for the codec or format.
 
-To check the same render path without opening a window, use a local H.264 video
-and run the opt-in software and VideoToolbox tests:
+To check the software, VideoToolbox copy and GPU render paths without opening a
+window, use a local H.264 video and run the opt-in tests:
 
 ```sh
 STREAMTUBE_MPV_TEST_VIDEO="/absolute/path/to/video.mp4" \

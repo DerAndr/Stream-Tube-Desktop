@@ -385,7 +385,7 @@ fn segmented<T: PartialEq + Clone + 'static>(id: &'static str, options: &[(T, &s
 fn accent_swatches(cur: u32, cx: &App) -> Div {
     let p = pal(cx);
     let mut d = div().flex().flex_none().items_center().gap_2();
-    for (c, name) in [(0xff0033u32, "Red"), (0xf0307e, "Pink"), (0xab47bc, "Purple"), (0x3ea6ff, "Blue"), (0x00bfa5, "Teal"), (0x2ba640, "Green"), (0xffa000, "Amber")] {
+    for (c, name) in ACCENT_COLOURS {
         let active = c == cur;
         d = d.child(
             div()
@@ -631,7 +631,7 @@ impl SettingsPage {
         card(cx)
             .child(row_text(t("YouTube account"), &account_desc, account_ctl, cx))
             .child({
-                let (desc, ctl) = match crate::api::web::account_name().filter(|_| crate::api::web::connected()) {
+                let (desc, ctl) = match crate::api::web::account_name() {
                     Some(name) => (
                         tf!("Connected as {0}. Videos you watch here show in your YouTube history and resume where you stopped on your other devices", name),
                         pill("web-out", Some("unlink"), "Disconnect", cx).on_click(|_, _, cx| crate::ui::app::disconnect_web(cx)),

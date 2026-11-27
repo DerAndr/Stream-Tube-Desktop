@@ -8,6 +8,30 @@ if [[ $(uname -s) != Darwin ]]; then
     exit 1
 fi
 
+safari_prototype=${STREAMTUBE_SAFARI_PROTOTYPE:-0}
+safari_test_id=${STREAMTUBE_SAFARI_TEST_ID:-}
+if [[ -n $safari_test_id ]]; then
+    if [[ ! $safari_test_id =~ ^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$ ]]; then
+        echo "STREAMTUBE_SAFARI_TEST_ID must be 1–32 lowercase ASCII letters, digits or hyphens, with a letter or digit at each end." >&2
+        exit 2
+    fi
+    safari_prototype=1
+fi
+
+app_name="Stream Tube"
+bundle_id=io.github.avaneesh-inamdar.StreamTube
+url_scheme=streamtube
+if [[ $safari_prototype == 1 ]]; then
+    app_name="Stream Tube Safari Prototype"
+    bundle_id="$bundle_id.SafariPrototype"
+    url_scheme=streamtube-safari-prototype
+    if [[ -n $safari_test_id ]]; then
+        app_name="Stream Tube Safari Test ($safari_test_id)"
+        bundle_id="$bundle_id.Test.$safari_test_id"
+        url_scheme="streamtube-safari-test-$safari_test_id"
+    fi
+fi
+
 cargo build --release --locked >&2
 metadata=$(cargo metadata --format-version 1 --no-deps --locked)
 version=$(printf '%s' "$metadata" | plutil -extract packages.0.version raw -o - -)
@@ -20,7 +44,7 @@ output_root="${1:-$PWD/dist/macos.noindex}"
 mkdir -p "$output_root"
 output_root=$(cd "$output_root" && pwd -P)
 output=$(mktemp -d "$output_root/StreamTube-$version-$(uname -m).XXXXXXXX")
-app="$output/Stream Tube.app"
+app="$output/$app_name.app"
 iconset="$output/StreamTube.iconset"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources" "$iconset"
 install -m 755 "$binary" "$app/Contents/MacOS/streamtube"
@@ -43,9 +67,9 @@ cat > "$app/Contents/Info.plist" <<EOF
     <key>CFBundleIconFile</key>
     <string>StreamTube.icns</string>
     <key>CFBundleIdentifier</key>
-    <string>io.github.avaneesh-inamdar.StreamTube</string>
+    <string>$bundle_id</string>
     <key>CFBundleName</key>
-    <string>Stream Tube</string>
+    <string>$app_name</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
@@ -64,14 +88,19 @@ cat > "$app/Contents/Info.plist" <<EOF
             <key>CFBundleURLName</key>
             <string>io.github.avaneesh-inamdar.StreamTube.link</string>
             <key>CFBundleURLSchemes</key>
-            <array><string>streamtube</string></array>
+            <array><string>$url_scheme</string></array>
         </dict>
     </array>
 </dict>
 </plist>
 EOF
 
+signing_identity=-
+if [[ $safari_prototype == 1 ]]; then
+    signing_identity=${STREAMTUBE_SAFARI_SIGNING_IDENTITY:--}
+    bash packaging/macos/safari-history/embed-extension.sh "$app" "$signing_identity" "$bundle_id" "$safari_test_id"
+fi
 plutil -lint "$app/Contents/Info.plist" >&2
-codesign --force --sign - "$app" >&2
+codesign --force --sign "$signing_identity" "$app" >&2
 codesign --verify --strict "$app"
 printf '%s\n' "$app"

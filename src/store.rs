@@ -393,10 +393,14 @@ pub fn data_dir() -> PathBuf {
             return d;
         }
         let base = dirs::data_dir().unwrap_or_else(|| PathBuf::from("."));
-        let d = base.join("StreamTube");
-        // carry over data from the app's previous name
+        #[cfg(target_os = "macos")]
+        let safari_profile = crate::api::safari::profile_name();
+        #[cfg(not(target_os = "macos"))]
+        let safari_profile: Option<String> = None;
+        let d = base.join(safari_profile.as_deref().unwrap_or("StreamTube"));
+        // Carry over data from the regular app's previous name.
         let old = base.join("Ferrotube");
-        if !d.exists() && old.exists() {
+        if safari_profile.is_none() && !d.exists() && old.exists() {
             let _ = std::fs::rename(&old, &d);
         }
         let _ = std::fs::create_dir_all(&d);

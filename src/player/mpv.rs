@@ -674,13 +674,15 @@ impl Mpv {
         if rc < 0 { Err(anyhow!("mpv command {:?}: {}", args.first(), err_str(rc))) } else { Ok(()) }
     }
 
+    // async, like `command`: setting properties from the UI never waits on mpv's
+    // dispatch lock while the core thread is opening or tearing down a stream
     pub fn set(&self, name: &str, value: &str) {
         if let Ok((_, f)) = lib() {
             let n = CString::new(name).unwrap_or_default();
             let v = CString::new(value).unwrap_or_default();
-            let mut ptr: *const c_char = v.as_ptr();
+            let mut p: *const c_char = v.as_ptr();
             unsafe {
-                (f.set_property_async)(self.h.0, 0, n.as_ptr(), MPV_FORMAT_STRING, &mut ptr as *mut *const c_char as *mut c_void);
+                (f.set_property_async)(self.h.0, 0, n.as_ptr(), MPV_FORMAT_STRING, &mut p as *mut *const c_char as *mut c_void);
             }
         }
     }

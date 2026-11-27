@@ -110,6 +110,15 @@ pub fn get_bytes(url: &str, headers: &[(&str, &str)]) -> Result<Vec<u8>> {
     Ok(buf)
 }
 
+/// An authenticated request whose headers must stay on the supplied origin.
+pub(super) fn get_status_without_redirects(url: &str, headers: &[(&str, &str)]) -> Result<u16> {
+    let mut req = agent().get(url).config().max_redirects(0).build();
+    for (name, value) in headers {
+        req = req.header(*name, *value);
+    }
+    Ok(req.call()?.status().as_u16())
+}
+
 pub fn get_text(url: &str) -> Result<String> {
     Ok(String::from_utf8_lossy(&get_bytes(url, &[])?).into_owned())
 }

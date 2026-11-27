@@ -8,10 +8,11 @@
 //!
 //! Signing in happens in a real browser (Edge, Chrome, Brave or Chromium) started
 //! with its own empty profile. The app reads that profile's youtube.com cookies over
-//! the browser's local debugging port once sign-in is done, then closes the browser
+//! a private DevTools pipe once sign-in is done, then closes the browser
 //! and deletes the profile. Nothing else from the user's browsers is read.
 use super::http;
 use anyhow::{Context, Result, anyhow};
+use futures::channel::oneshot;
 use parking_lot::Mutex;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
@@ -38,6 +39,25 @@ fn session() -> &'static Mutex<Option<Session>> {
     })
 }
 
+#[cfg(target_os = "macos")]
+static SAFARI_PLAYBACK_SESSION: Mutex<Option<Session>> = Mutex::new(None);
+
+fn playback_session() -> Option<Session> {
+    #[cfg(target_os = "macos")]
+    if let Some(safari) = SAFARI_PLAYBACK_SESSION.lock().as_ref() {
+        return Some(safari.clone());
+    }
+    session().lock().clone()
+}
+
+fn playback_connected() -> bool {
+    #[cfg(target_os = "macos")]
+    if SAFARI_PLAYBACK_SESSION.lock().is_some() {
+        return true;
+    }
+    connected()
+}
+
 fn save(s: &Option<Session>) {
     crate::store::kv_set("web_session", &s.as_ref().map(|s| serde_json::to_string(s).unwrap_or_default()).unwrap_or_default());
 }
@@ -57,37 +77,56 @@ pub fn connected() -> bool {
 
 /// The account name the browser session belongs to.
 pub fn account_name() -> Option<String> {
+    #[cfg(target_os = "macos")]
+    if let Some(safari) = SAFARI_PLAYBACK_SESSION.lock().as_ref() {
+        return safari.account.clone();
+    }
     session().lock().as_ref().and_then(|s| s.account.clone())
 }
 
 pub fn disconnect() {
+    #[cfg(target_os = "macos")]
+    SAFARI_PLAYBACK_SESSION.lock().take();
     let mut s = session().lock();
     *s = None;
     save(&s);
 }
 
-/// Stores a set of youtube.com cookies and checks they belong to a signed-in account.
+/// Validate the candidate before replacing the current account session.
 fn connect(cookies: BTreeMap<String, String>) -> Result<String> {
+    let (candidate, name) = verify_session(cookies)?;
+    #[cfg(target_os = "macos")]
+    SAFARI_PLAYBACK_SESSION.lock().take();
+    let mut current = session().lock();
+    *current = Some(candidate);
+    save(&current);
+    Ok(name)
+}
+
+#[cfg(target_os = "macos")]
+pub(super) fn connect_safari(cookies: &[Value], cancel: &AtomicBool) -> Result<String> {
+    let (candidate, name) = verify_session(youtube_cookies(cookies))?;
+    let mut current = SAFARI_PLAYBACK_SESSION.lock();
+    if cancel.load(Ordering::Acquire) {
+        return Err(anyhow!("Safari sign-in cancelled"));
+    }
+    // Keep the session in memory and separate from the signed-in browsing features.
+    *current = Some(candidate);
+    Ok(name)
+}
+
+fn verify_session(cookies: BTreeMap<String, String>) -> Result<(Session, String)> {
     if !has_login(&cookies) {
         return Err(anyhow!("These cookies aren't from a signed-in YouTube session."));
     }
-    {
-        let mut s = session().lock();
-        *s = Some(Session { cookies, account: None });
-    }
-    let name = match fetch_account_name() {
-        Ok(n) => n,
-        Err(e) => {
-            *session().lock() = None;
-            return Err(e.context("YouTube didn't accept the session"));
-        }
-    };
-    let mut s = session().lock();
-    if let Some(st) = s.as_mut() {
-        st.account = Some(name.clone());
-    }
-    save(&s);
-    Ok(name)
+    let mut candidate = Session { cookies, account: None };
+    let name = fetch_account_name(&candidate).context("YouTube didn't accept the session")?;
+    candidate.account = Some(name.clone());
+    Ok((candidate, name))
+}
+
+fn cookie_header_for(s: &Session) -> String {
+    s.cookies.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join("; ")
 }
 
 /// Writes the browser sign-in's youtube.com cookies as a Netscape cookies.txt for
@@ -119,21 +158,14 @@ pub fn write_cookies_file() -> Option<PathBuf> {
     Some(path)
 }
 
-fn cookie_header() -> Option<String> {
-    let s = session().lock();
-    let s = s.as_ref()?;
-    Some(s.cookies.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join("; "))
-}
-
 fn sha1_hex(s: &str) -> String {
     use sha1::{Digest, Sha1};
     Sha1::digest(s.as_bytes()).iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// The `Authorization` header youtube.com sends with its API calls.
-fn sapisid_auth() -> Option<String> {
-    let s = session().lock();
-    let c = &s.as_ref()?.cookies;
+fn sapisid_auth(s: &Session) -> Option<String> {
+    let c = &s.cookies;
     let ts = chrono::Utc::now().timestamp();
     let parts: Vec<String> = [("SAPISIDHASH", "SAPISID"), ("SAPISID1PHASH", "__Secure-1PAPISID"), ("SAPISID3PHASH", "__Secure-3PAPISID")]
         .iter()
@@ -146,9 +178,14 @@ fn sapisid_auth() -> Option<String> {
 }
 
 /// A call to the YouTube website's API as the signed-in user.
-pub fn web_call(endpoint: &str, mut body: Value) -> Result<Value> {
-    let cookie = cookie_header().ok_or_else(|| anyhow!("browser sign-in not connected"))?;
-    let auth = sapisid_auth().ok_or_else(|| anyhow!("browser sign-in not connected"))?;
+pub fn web_call(endpoint: &str, body: Value) -> Result<Value> {
+    let signed_in = session().lock().clone().ok_or_else(|| anyhow!("browser sign-in not connected"))?;
+    web_call_with(&signed_in, endpoint, body)
+}
+
+fn web_call_with(s: &Session, endpoint: &str, mut body: Value) -> Result<Value> {
+    let cookie = cookie_header_for(s);
+    let auth = sapisid_auth(s).ok_or_else(|| anyhow!("browser sign-in not connected"))?;
     let st = crate::store::settings_snapshot();
     body["context"] = json!({ "client": { "clientName": "WEB", "clientVersion": WEB_VERSION, "hl": st.language, "gl": st.region } });
     let (status, v) = http::post_json_status(
@@ -175,8 +212,8 @@ pub fn web_call(endpoint: &str, mut body: Value) -> Result<Value> {
     Ok(v)
 }
 
-fn fetch_account_name() -> Result<String> {
-    let r = web_call("account/account_menu", json!({}))?;
+fn fetch_account_name(s: &Session) -> Result<String> {
+    let r = web_call_with(s, "account/account_menu", json!({}))?;
     let header = crate::api::json::find(&r, "activeAccountHeaderRenderer").ok_or_else(|| anyhow!("not signed in"))?;
     let name = header.get("accountName").map(crate::api::json::text).filter(|s| !s.is_empty());
     let handle = header.get("channelHandle").map(crate::api::json::text).filter(|s| !s.is_empty());
@@ -207,8 +244,30 @@ pub fn browse_continue(token: &str) -> Result<crate::api::types::Page> {
 
 // ───────────── sign-in through a browser ─────────────
 
+#[cfg(target_os = "macos")]
+fn find_macos_browser(applications: &std::path::Path, user_applications: Option<&std::path::Path>) -> Option<(String, PathBuf)> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let browsers = [
+        ("Google Chrome", "Google Chrome"),
+        ("Microsoft Edge", "Microsoft Edge"),
+        ("Brave", "Brave Browser"),
+        ("Chromium", "Chromium"),
+        ("Vivaldi", "Vivaldi"),
+    ];
+    browsers.into_iter().find_map(|(name, bundle)| {
+        [Some(applications), user_applications].into_iter().flatten().find_map(|directory| {
+            let executable = directory.join(format!("{bundle}.app")).join("Contents/MacOS").join(bundle);
+            executable
+                .metadata()
+                .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+                .then(|| (name.to_string(), executable))
+        })
+    })
+}
+
 /// Chromium-based browsers the sign-in can use, most likely first.
-fn find_browser() -> Option<(String, PathBuf)> {
+pub(crate) fn find_browser() -> Option<(String, PathBuf)> {
     #[cfg(windows)]
     {
         let pf = std::env::var("ProgramFiles").unwrap_or_else(|_| r"C:\Program Files".into());
@@ -230,23 +289,12 @@ fn find_browser() -> Option<(String, PathBuf)> {
     {
         #[cfg(target_os = "macos")]
         {
-            let home = std::env::var("HOME").unwrap_or_default();
-            let apps = [
-                ("Google Chrome", "Google Chrome.app/Contents/MacOS/Google Chrome"),
-                ("Microsoft Edge", "Microsoft Edge.app/Contents/MacOS/Microsoft Edge"),
-                ("Brave", "Brave Browser.app/Contents/MacOS/Brave Browser"),
-                ("Chromium", "Chromium.app/Contents/MacOS/Chromium"),
-                ("Vivaldi", "Vivaldi.app/Contents/MacOS/Vivaldi"),
-            ];
-            for (n, rel) in apps {
-                for dir in ["/Applications".to_string(), format!("{home}/Applications")] {
-                    let p = PathBuf::from(&dir).join(rel);
-                    if p.is_file() {
-                        return Some((n.to_string(), p));
-                    }
-                }
+            let user_applications = dirs::home_dir().map(|home| home.join("Applications"));
+            if let Some(browser) = find_macos_browser(std::path::Path::new("/Applications"), user_applications.as_deref()) {
+                return Some(browser);
             }
         }
+
         let names = [
             ("Google Chrome", "google-chrome"),
             ("Google Chrome", "google-chrome-stable"),
@@ -269,11 +317,6 @@ fn find_browser() -> Option<(String, PathBuf)> {
         }
         None
     }
-}
-
-/// Name of the browser the sign-in will open, if there is one.
-pub fn browser_name() -> Option<String> {
-    find_browser().map(|(n, _)| n)
 }
 
 /// The sign-in browser's DevTools connection. It runs over a pair of pipes that
@@ -412,12 +455,9 @@ fn youtube_cookies(list: &[Value]) -> BTreeMap<String, String> {
     out
 }
 
-/// Opens a browser window for the user to sign in to YouTube and waits until they
-/// have. Returns the account name. `cancel` stops waiting and closes the browser.
-pub fn browser_sign_in(cancel: Arc<AtomicBool>) -> Result<String> {
-    let (_, exe) = find_browser().ok_or_else(|| {
-        anyhow!("No supported browser found. Install Google Chrome, Microsoft Edge, Brave or Chromium, or import a cookies.txt file instead.")
-    })?;
+/// Opens the selected browser for YouTube sign-in and returns the account name.
+/// Setting `cancel` stops waiting and closes the temporary browser window.
+pub fn browser_sign_in(exe: PathBuf, cancel: Arc<AtomicBool>) -> Result<String> {
     let profile = crate::store::data_dir().join(format!("signin-browser-{:016x}", rand::random::<u64>()));
     let mut dir = std::fs::DirBuilder::new();
     #[cfg(unix)]
@@ -616,6 +656,72 @@ fn sts() -> Option<u64> {
     Some(v)
 }
 
+/// Use the same origin as the signed-in YouTube website and preserve its tracking query.
+fn first_party_stats_url(base: &str, endpoint: &str) -> Result<String> {
+    let suffix = base
+        .strip_prefix("https://s.youtube.com/")
+        .or_else(|| base.strip_prefix("https://www.youtube.com/"))
+        .ok_or_else(|| anyhow!("unexpected playback stats origin"))?;
+    let expected = format!("api/stats/{endpoint}");
+    if suffix.split('?').next() != Some(expected.as_str()) || suffix.contains('#') {
+        return Err(anyhow!("unexpected playback stats endpoint"));
+    }
+    Ok(format!("{ORIGIN}/{suffix}"))
+}
+
+fn stats_url(base: &str, fields: Vec<(&str, String)>) -> String {
+    let (path, query) = base.split_once('?').unwrap_or((base, ""));
+    let final_report = fields.iter().any(|(key, value)| *key == "final" && value == "1");
+    let mut pairs: Vec<(String, String)> = query
+        .split('&')
+        .filter(|kv| !kv.is_empty())
+        .filter_map(|kv| {
+            let (key, value) = kv.split_once('=').unwrap_or((kv, ""));
+            // Safari's final watch-time report has no scheduled follow-up.
+            if final_report && matches!(key, "rtn" | "rti") {
+                return None;
+            }
+            Some((key.to_string(), value.to_string()))
+        })
+        .collect();
+    for (key, value) in fields {
+        match pairs.iter_mut().find(|(current, _)| current == key) {
+            Some(pair) => pair.1 = value,
+            None => pairs.push((key.to_string(), value)),
+        }
+    }
+    format!("{path}?{}", pairs.iter().map(|(key, value)| format!("{key}={value}")).collect::<Vec<_>>().join("&"))
+}
+
+fn watch_diagnostics_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("STREAMTUBE_WATCH_HISTORY_DIAGNOSTICS").is_some_and(|v| v == "1"))
+}
+
+// Log only the allowed fields in the request as sent, with their values validated.
+fn watch_report_summary(url: &str, status: Option<u16>) -> String {
+    use std::fmt::Write;
+
+    let (path, query) = url.split_once('?').unwrap_or((url, ""));
+    let phase = if path.ends_with("/watchtime") { "watchtime" } else { "playback" };
+    let mut summary = match status {
+        Some(code) => format!("{phase} http={code}"),
+        None => format!("{phase} http=unavailable"),
+    };
+    for (key, value) in query.split('&').filter_map(|pair| pair.split_once('=')) {
+        let allowed = match key {
+            "cmt" | "st" | "et" | "len" | "rt" | "rtn" | "rti" => value.parse::<f64>().is_ok_and(f64::is_finite),
+            "state" => matches!(value, "playing" | "paused"),
+            "final" => value == "1",
+            _ => false,
+        };
+        if allowed {
+            let _ = write!(summary, " {key}={value}");
+        }
+    }
+    summary
+}
+
 struct Watch {
     id: String,
     playback: String,
@@ -630,29 +736,35 @@ struct Watch {
 }
 
 impl Watch {
-    fn begin(id: &str, len: f64) -> Result<Self> {
-        let mut body = json!({ "videoId": id, "racyCheckOk": true, "contentCheckOk": true });
-        if let Some(sts) = sts() {
-            body["playbackContext"] = json!({ "contentPlaybackContext": { "signatureTimestamp": sts, "html5Preference": "HTML5_PREF_WANTS" } });
-        }
-        let r = web_call("player", body)?;
-        let url = |k: &str| r.pointer(&format!("/playbackTracking/{k}/baseUrl")).and_then(Value::as_str).map(str::to_string);
-        let playback = url("videostatsPlaybackUrl").ok_or_else(|| anyhow!("no playback tracking"))?;
-        let watchtime = url("videostatsWatchtimeUrl").ok_or_else(|| anyhow!("no watchtime tracking"))?;
-        let len = r
-            .pointer("/videoDetails/lengthSeconds")
-            .and_then(Value::as_str)
-            .and_then(|s| s.parse().ok())
-            .filter(|l: &f64| *l > 0.0)
-            .unwrap_or(len);
+    fn begin(id: &str, len: f64, start: f64) -> Result<Self> {
         let cpn: String = {
             use rand::Rng;
             const A: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
             let mut rng = rand::rng();
             (0..16).map(|_| A[rng.random_range(0..A.len())] as char).collect()
         };
-        let w = Watch { id: id.to_string(), playback, watchtime, cpn, len, started: Instant::now(), last_ping: Instant::now(), last_cmt: 0.0, pings: 0, playing: true };
-        w.get(&w.playback, &[("cmt", "0".into()), ("rtn", "0".into()), ("state", "playing".into())])?;
+        let mut body = json!({ "videoId": id, "cpn": cpn, "racyCheckOk": true, "contentCheckOk": true });
+        if let Some(sts) = sts() {
+            body["playbackContext"] = json!({ "contentPlaybackContext": { "signatureTimestamp": sts, "html5Preference": "HTML5_PREF_WANTS" } });
+        }
+        let session = playback_session().ok_or_else(|| anyhow!("watch history is disconnected"))?;
+        let r = web_call_with(&session, "player", body)?;
+        let tracking_url = |key: &str, endpoint: &str| {
+            let url = r.pointer(&format!("/playbackTracking/{key}/baseUrl")).and_then(Value::as_str)
+                .ok_or_else(|| anyhow!("no {endpoint} tracking"))?;
+            first_party_stats_url(url, endpoint)
+        };
+        let playback = tracking_url("videostatsPlaybackUrl", "playback")?;
+        let watchtime = tracking_url("videostatsWatchtimeUrl", "watchtime")?;
+        let len = r
+            .pointer("/videoDetails/lengthSeconds")
+            .and_then(Value::as_str)
+            .and_then(|s| s.parse().ok())
+            .filter(|l: &f64| *l > 0.0)
+            .unwrap_or(len);
+        let start = start.max(0.0);
+        let w = Watch { id: id.to_string(), playback, watchtime, cpn, len, started: Instant::now(), last_ping: Instant::now(), last_cmt: start, pings: 0, playing: true };
+        w.get(&w.playback, &[("cmt", format!("{start:.3}")), ("rtn", "0".into()), ("state", "playing".into())])?;
         Ok(w)
     }
 
@@ -660,10 +772,6 @@ impl Watch {
     /// youtube.com's own player adds. Fields already in the base URL are replaced,
     /// never repeated.
     fn get(&self, base: &str, fields: &[(&str, String)]) -> Result<()> {
-        // the ping carries the sign-in cookies: only ever to YouTube itself
-        if !is_youtube_https(base) {
-            return Err(anyhow!("unexpected stats host"));
-        }
         let rt = self.started.elapsed().as_secs_f64();
         let mut add: Vec<(&str, String)> = vec![
             ("ver", "2".into()),
@@ -684,54 +792,54 @@ impl Watch {
             ("rt", format!("{rt:.3}")),
         ];
         add.extend(fields.iter().cloned());
-        let (path, query) = base.split_once('?').unwrap_or((base, ""));
-        let mut pairs: Vec<(String, String)> = query
-            .split('&')
-            .filter(|kv| !kv.is_empty())
-            .map(|kv| {
-                let (k, v) = kv.split_once('=').unwrap_or((kv, ""));
-                (k.to_string(), v.to_string())
-            })
-            .collect();
-        for (k, v) in add {
-            match pairs.iter_mut().find(|(pk, _)| pk == k) {
-                Some(p) => p.1 = v,
-                None => pairs.push((k.to_string(), v)),
-            }
-        }
-        let url = format!("{path}?{}", pairs.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join("&"));
-        let cookie = cookie_header().unwrap_or_default();
+        let url = stats_url(base, add);
+        let session = playback_session().ok_or_else(|| anyhow!("watch history is disconnected"))?;
+        let cookie = cookie_header_for(&session);
         let referer = format!("https://www.youtube.com/watch?v={}", self.id);
-        http::get_bytes(&url, &[("Cookie", &cookie), ("Referer", &referer), ("Origin", ORIGIN)])?;
+        let status = http::get_status_without_redirects(
+            &url,
+            &[("Cookie", &cookie), ("Referer", &referer), ("Origin", ORIGIN), ("Cache-Control", "no-cache")],
+        );
+        if watch_diagnostics_enabled() {
+            eprintln!("Watch history: {}", watch_report_summary(&url, status.as_ref().ok().copied()));
+        }
+        let status = status.map_err(|_| anyhow!("playback stats transport failed"))?;
+        if !(200..300).contains(&status) {
+            return Err(anyhow!("playback stats HTTP {status}"));
+        }
         Ok(())
     }
 
-    /// Reports the stretch watched since the last report, ending at `cmt`.
-    fn report(&mut self, cmt: f64, playing: bool, last: bool) {
+    fn watchtime_fields(&self, cmt: f64, playing: bool, last: bool) -> Vec<(&'static str, String)> {
         let st = if cmt >= self.last_cmt && cmt - self.last_cmt < 120.0 { self.last_cmt } else { cmt };
-        let rtn = self.started.elapsed().as_secs_f64();
         let mut fields = vec![
             ("cmt", format!("{cmt:.3}")),
             ("st", format!("{st:.3}")),
             ("et", format!("{cmt:.3}")),
             ("state", if playing { "playing" } else { "paused" }.to_string()),
-            ("rtn", format!("{:.0}", rtn.max(1.0))),
-            ("rti", format!("{:.0}", rtn.max(1.0))),
             ("idpj", "-1".into()),
             ("ldpj", "-1".into()),
         ];
         if last {
             fields.push(("final", "1".into()));
+        } else {
+            let elapsed = format!("{:.0}", self.started.elapsed().as_secs_f64().max(1.0));
+            fields.push(("rtn", elapsed.clone()));
+            fields.push(("rti", elapsed));
         }
-        if let Err(e) = self.get(&self.watchtime, &fields) {
-            if cfg!(test) {
-                eprintln!("watchtime ping failed: {e}");
-            }
-        }
-        self.last_cmt = cmt;
+        fields
+    }
+
+    /// Reports the stretch watched since the last report, ending at `cmt`.
+    fn report(&mut self, cmt: f64, playing: bool, last: bool) {
+        let fields = self.watchtime_fields(cmt, playing, last);
+        let result = self.get(&self.watchtime, &fields);
         self.last_ping = Instant::now();
-        self.pings += 1;
-        self.playing = playing;
+        if result.is_ok() {
+            self.last_cmt = cmt;
+            self.pings += 1;
+            self.playing = playing;
+        }
     }
 
     /// youtube.com reports at 10, 20 and 30 seconds, then every 40 seconds.
@@ -742,14 +850,16 @@ impl Watch {
 }
 
 enum Event {
-    Start { id: String, len: f64 },
+    Start { id: String, len: f64, start: f64 },
     Progress { id: String, t: f64, playing: bool },
     Stop { id: String, t: f64 },
+    Flush(oneshot::Sender<()>),
 }
 
+static REPORTER: OnceLock<Mutex<mpsc::Sender<Event>>> = OnceLock::new();
+
 fn reporter() -> &'static Mutex<mpsc::Sender<Event>> {
-    static TX: OnceLock<Mutex<mpsc::Sender<Event>>> = OnceLock::new();
-    TX.get_or_init(|| {
+    REPORTER.get_or_init(|| {
         let (tx, rx) = mpsc::channel::<Event>();
         std::thread::Builder::new()
             .name("watch-report".into())
@@ -757,12 +867,15 @@ fn reporter() -> &'static Mutex<mpsc::Sender<Event>> {
                 let mut cur: Option<Watch> = None;
                 while let Ok(ev) = rx.recv() {
                     match ev {
-                        Event::Start { id, len } => {
+                        Event::Start { id, len, start } => {
                             if let Some(mut w) = cur.take() {
                                 let t = w.last_cmt;
                                 w.report(t, false, true);
                             }
-                            cur = Watch::begin(&id, len).ok();
+                            cur = Watch::begin(&id, len, start).ok();
+                            if cur.is_none() && watch_diagnostics_enabled() {
+                                eprintln!("Watch history: playback tracking did not start");
+                            }
                         }
                         Event::Progress { id, t, playing } => {
                             if let Some(w) = cur.as_mut().filter(|w| w.id == id) {
@@ -780,6 +893,9 @@ fn reporter() -> &'static Mutex<mpsc::Sender<Event>> {
                                 }
                             }
                         }
+                        Event::Flush(flushed) => {
+                            let _ = flushed.send(());
+                        }
                     }
                 }
             })
@@ -789,46 +905,420 @@ fn reporter() -> &'static Mutex<mpsc::Sender<Event>> {
 }
 
 /// A video started playing.
-pub fn report_start(id: &str, len: f64) {
-    if connected() && crate::store::settings_snapshot().history_enabled {
-        let _ = reporter().lock().send(Event::Start { id: id.to_string(), len });
+pub fn report_start(id: &str, len: f64, start: f64) {
+    if playback_connected() && crate::store::settings_snapshot().history_enabled {
+        let _ = reporter().lock().send(Event::Start { id: id.to_string(), len, start });
     }
 }
 
 /// Playback position update; cheap to call often.
 pub fn report_progress(id: &str, t: f64, playing: bool) {
-    if connected() {
-        let _ = reporter().lock().send(Event::Progress { id: id.to_string(), t, playing });
-    }
+    send_position_report(|| Event::Progress { id: id.to_string(), t, playing });
 }
 
 /// The video was closed or replaced at position `t`.
 pub fn report_stop(id: &str, t: f64) {
-    if connected() {
-        let _ = reporter().lock().send(Event::Stop { id: id.to_string(), t });
+    send_position_report(|| Event::Stop { id: id.to_string(), t });
+}
+
+/// Wait for requests already queued, including a final report from a recently
+/// closed player. There is nothing to flush until the worker has started.
+pub(crate) fn flush_watch_reports() -> Option<oneshot::Receiver<()>> {
+    let (flushed, done) = oneshot::channel();
+    #[cfg(test)]
+    if let Some(sender) = TEST_POSITION_REPORTS.with(|reports| reports.borrow().clone()) {
+        sender.send(Event::Flush(flushed)).ok()?;
+        return Some(done);
+    }
+    REPORTER.get()?.lock().send(Event::Flush(flushed)).ok()?;
+    Some(done)
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_POSITION_REPORTS: std::cell::RefCell<Option<mpsc::Sender<Event>>> = const { std::cell::RefCell::new(None) };
+}
+
+fn send_position_report(event: impl FnOnce() -> Event) {
+    #[cfg(test)]
+    if let Some(sender) = TEST_POSITION_REPORTS.with(|reports| reports.borrow().clone()) {
+        let _ = sender.send(event());
+        return;
+    }
+    if playback_connected() {
+        let _ = reporter().lock().send(event());
     }
 }
 
-/// `https://youtube.com/...` or `https://<anything>.youtube.com/...`, nothing else.
-fn is_youtube_https(url: &str) -> bool {
-    let Some(rest) = url.strip_prefix("https://") else { return false };
-    let host = rest.split(['/', '?', '#']).next().unwrap_or("");
-    // no user info or port tricks ("youtube.com@evil.example")
-    !host.contains(['@', ':']) && (host == "youtube.com" || host.ends_with(".youtube.com"))
+#[cfg(test)]
+mod playback_tests {
+    use super::{Event, REPORTER, TEST_POSITION_REPORTS, Watch, oneshot, stats_url, watch_report_summary};
+    use crate::PlatformQuitRequested;
+    use crate::api::types::VideoItem;
+    use crate::player::controller;
+    use crate::ui::{Pal, app::UiState, pip};
+    use gpui::{Empty, TestAppContext, WindowHandle};
+    use std::sync::mpsc::{Receiver, TryRecvError};
+    use std::time::Duration;
+
+    #[test]
+    fn watch_report_summary_uses_only_allowlisted_fields_and_status() {
+        let request = "https://www.youtube.com/api/stats/watchtime?docid=video&cpn=session&ei=token&cmt=82.125&st=80&et=82.125&rt=83.200&len=464&state=paused&final=1";
+        assert_eq!(
+            watch_report_summary(request, Some(204)),
+            "watchtime http=204 cmt=82.125 st=80 et=82.125 rt=83.200 len=464 state=paused final=1",
+        );
+        let invalid = "https://www.youtube.com/api/stats/playback?cmt=%53ecret&len=NaN&rti=inf&state=unknown&final=token&rtn=10";
+        assert_eq!(watch_report_summary(invalid, None), "playback http=unavailable rtn=10");
+    }
+
+    #[test]
+    fn final_watchtime_url_keeps_the_position_and_omits_the_schedule() {
+        let now = std::time::Instant::now();
+        let watch = Watch {
+            id: String::new(),
+            playback: String::new(),
+            watchtime: "https://www.youtube.com/api/stats/watchtime?docid=synthetic&rtn=9&rti=8".into(),
+            cpn: String::new(),
+            len: 464.0,
+            started: now,
+            last_ping: now,
+            last_cmt: 80.0,
+            pings: 1,
+            playing: true,
+        };
+        for last in [false, true] {
+            let request = stats_url(&watch.watchtime, watch.watchtime_fields(82.125, false, last));
+            let (_, query) = request.split_once('?').unwrap();
+            let fields: std::collections::BTreeMap<_, _> =
+                query.split('&').map(|pair| pair.split_once('=').unwrap()).collect();
+            assert_eq!(fields.get("cmt"), Some(&"82.125"));
+            assert_eq!(fields.get("st"), Some(&"80.000"));
+            assert_eq!(fields.get("et"), Some(&"82.125"));
+            assert_eq!(fields.get("docid"), Some(&"synthetic"));
+            assert_eq!(fields.get("state"), Some(&"paused"));
+            assert_eq!(fields.get("final"), last.then_some(&"1"));
+            assert_eq!(fields.contains_key("rtn"), !last);
+            assert_eq!(fields.contains_key("rti"), !last);
+        }
+    }
+
+    #[gpui::test]
+    fn closing_player_only_enqueues_the_final_position(cx: &mut TestAppContext) {
+        let video_id = "test-watch-history-close";
+        let (sender, reports) = std::sync::mpsc::channel();
+        TEST_POSITION_REPORTS.with(|slot| slot.replace(Some(sender)));
+        cx.update(|cx| {
+            controller::init(cx);
+            controller::player(cx).update(cx, |player, cx| {
+                player.video = Some(VideoItem { id: video_id.into(), ..Default::default() });
+                player.time = 82.125;
+                player.duration = 464.0;
+                player.set_paused(true);
+                player.stop(cx);
+            });
+        });
+        TEST_POSITION_REPORTS.with(|slot| slot.take());
+
+        let events: Vec<_> = reports.try_iter().collect();
+        assert!(matches!(events.as_slice(), [
+            Event::Progress { id: paused_id, t: 82.125, playing: false },
+            Event::Stop { id: closed_id, t: 82.125 },
+        ] if paused_id == video_id && closed_id == video_id));
+    }
+
+    #[gpui::test]
+    fn app_quit_enqueues_one_final_position_before_flushing(cx: &mut TestAppContext) {
+        let (sender, reports) = std::sync::mpsc::channel();
+        TEST_POSITION_REPORTS.with(|slot| slot.replace(Some(sender)));
+        cx.update(|cx| {
+            controller::init(cx);
+            controller::player(cx).update(cx, |player, _| {
+                player.video = Some(VideoItem { id: "test-watch-history-quit".into(), ..Default::default() });
+                player.time = 84.625;
+                player.duration = 464.0;
+            });
+            crate::request_quit(cx);
+            crate::request_quit(cx);
+        });
+        TEST_POSITION_REPORTS.with(|slot| slot.take());
+
+        assert!(matches!(reports.recv().unwrap(),
+            Event::Stop { id, t: 84.625 } if id == "test-watch-history-quit"));
+        let Event::Flush(flushed) = reports.recv().unwrap() else {
+            panic!("quit must wait for the reporter after enqueuing the final position");
+        };
+        assert!(reports.try_recv().is_err());
+        flushed.send(()).unwrap();
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn closing_last_main_window_enqueues_one_final_position_before_flushing(cx: &mut TestAppContext) {
+        let video_id = "test-watch-history-last-main-window";
+        let (main, reports) = open_main_window_with_watch_history(cx, video_id);
+        let other = cx.add_window(|_, _| Empty);
+        // GPUI's native close callback also goes through Window::remove_window.
+        other.update(cx, |_, window, _| window.remove_window()).unwrap();
+        cx.run_until_parked();
+        assert!(matches!(reports.try_recv(), Err(TryRecvError::Empty)),
+            "closing a non-final window must leave reporting active");
+
+        main.update(cx, |_, window, _| window.remove_window()).unwrap();
+        cx.run_until_parked();
+        assert!(cx.windows().is_empty());
+        assert_final_report_before_flush(cx, &reports, video_id);
+    }
+
+    #[gpui::test]
+    fn closing_last_main_window_with_pip_open_flushes_the_final_position(cx: &mut TestAppContext) {
+        let video_id = "test-watch-history-last-main-window-with-pip";
+        let (main, reports) = open_main_window_with_watch_history(cx, video_id);
+        cx.update(pip::open);
+        let panel = cx.read(pip::handle).expect("PiP window opened");
+        assert!(cx.windows().contains(&panel));
+        assert!(cx.read(|cx| cx.try_global::<crate::QuitRequested>().is_none()));
+
+        main.update(cx, |_, window, _| window.remove_window()).unwrap();
+        cx.run_until_parked();
+        assert!(main.root(cx).is_err(), "the main window must be closed before the flush");
+        assert_final_report_before_flush(cx, &reports, video_id);
+    }
+
+    #[gpui::test]
+    fn closing_pip_alone_keeps_the_main_window_and_playback_active(cx: &mut TestAppContext) {
+        let video_id = "test-watch-history-close-pip-only";
+        let (main, reports) = open_main_window_with_watch_history(cx, video_id);
+        cx.update(pip::open);
+        let panel = cx.read(pip::handle).expect("PiP window opened");
+
+        panel.update(cx, |_, window, _| window.remove_window()).unwrap();
+        cx.run_until_parked();
+        assert_eq!(cx.windows(), [main.into()]);
+        assert!(cx.read(pip::handle).is_none());
+        cx.read(|cx| {
+            assert!(cx.try_global::<crate::QuitRequested>().is_none());
+            let player = controller::player(cx);
+            let player = player.read(cx);
+            assert_eq!(
+                player.video.as_ref().map(|video| video.id.as_str()),
+                Some(video_id)
+            );
+            assert!(!player.paused);
+            assert_eq!(player.time, SHUTDOWN_TEST_POSITION);
+        });
+        assert!(
+            reports.try_iter().all(|event| !matches!(event, Event::Stop { .. } | Event::Flush(_))),
+            "closing PiP alone must leave reporting active"
+        );
+    }
+
+    #[gpui::test]
+    fn shutdown_waits_for_watch_history_flush_acknowledgement(cx: &mut TestAppContext) {
+        let video_id = "test-watch-history-shutdown-ack";
+        let (main, reports) = open_main_window_with_watch_history(cx, video_id);
+        main.update(cx, |_, window, _| window.remove_window()).unwrap();
+        cx.run_until_parked();
+        let flushed = take_final_report_and_flush(&reports, video_id);
+        assert!(!cx.read(|cx| cx.has_global::<PlatformQuitRequested>()));
+
+        cx.executor().advance_clock(Duration::from_secs(2));
+        cx.run_until_parked();
+        assert!(!cx.read(|cx| cx.has_global::<PlatformQuitRequested>()),
+            "platform exit must wait while the flush is pending");
+
+        flushed.send(()).unwrap();
+        cx.run_until_parked();
+        assert!(cx.read(|cx| cx.has_global::<PlatformQuitRequested>()),
+            "the flush acknowledgement must release platform exit before the deadline");
+    }
+
+    #[gpui::test]
+    fn shutdown_requests_exit_when_watch_history_reporter_disconnects(cx: &mut TestAppContext) {
+        let video_id = "test-watch-history-shutdown-disconnect";
+        let (main, reports) = open_main_window_with_watch_history(cx, video_id);
+        main.update(cx, |_, window, _| window.remove_window()).unwrap();
+        cx.run_until_parked();
+        let flushed = take_final_report_and_flush(&reports, video_id);
+        assert!(!cx.read(|cx| cx.has_global::<PlatformQuitRequested>()),
+            "platform exit must wait while the flush is pending");
+
+        drop(reports);
+        drop(flushed);
+        // Process the channel closure without advancing the shutdown deadline.
+        cx.run_until_parked();
+        assert!(cx.read(|cx| cx.has_global::<PlatformQuitRequested>()),
+            "closing the flush acknowledgement channel must release platform exit immediately");
+    }
+
+    #[gpui::test]
+    fn shutdown_requests_exit_at_three_seconds_if_watch_history_flush_stalls(cx: &mut TestAppContext) {
+        let video_id = "test-watch-history-shutdown-timeout";
+        let (main, reports) = open_main_window_with_watch_history(cx, video_id);
+        main.update(cx, |_, window, _| window.remove_window()).unwrap();
+        cx.run_until_parked();
+        let flushed = take_final_report_and_flush(&reports, video_id);
+
+        cx.executor().advance_clock(Duration::from_millis(2_999));
+        cx.run_until_parked();
+        assert!(!cx.read(|cx| cx.has_global::<PlatformQuitRequested>()),
+            "platform exit must wait until the full three seconds have elapsed");
+
+        cx.executor().advance_clock(Duration::from_millis(1));
+        cx.run_until_parked();
+        assert!(cx.read(|cx| cx.has_global::<PlatformQuitRequested>()),
+            "platform exit must proceed at the deadline with no acknowledgement");
+        assert!(flushed.is_canceled(), "the timeout must stop waiting for the reporter");
+    }
+
+    #[gpui::test]
+    fn closing_last_window_with_disconnected_reporter_requests_immediate_exit(cx: &mut TestAppContext) {
+        let video_id = "test-watch-history-queue-disconnected-before-close";
+        let (main, reports) = open_main_window_with_watch_history(cx, video_id);
+        drop(reports);
+        assert!(!cx.read(|cx| cx.has_global::<PlatformQuitRequested>()));
+
+        main.update(cx, |_, window, _| window.remove_window()).unwrap();
+
+        assert!(cx.windows().is_empty());
+        assert!(cx.read(|cx| cx.has_global::<PlatformQuitRequested>()),
+            "a failed flush enqueue must request platform exit synchronously");
+
+        // Let any spawned work register its timers without advancing the test clock.
+        cx.run_until_parked();
+        assert!(!cx.dispatcher.scheduler().has_pending_tasks(),
+            "a disconnected reporter queue must leave no shutdown timer pending");
+    }
+
+    #[gpui::test]
+    fn closing_last_window_without_reporter_requests_immediate_exit(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            controller::init(cx);
+            crate::register_window_close_handler(cx);
+        });
+        let main = cx.add_window(|_, _| Empty);
+        assert!(REPORTER.get().is_none());
+        assert!(TEST_POSITION_REPORTS.with(|slot| slot.borrow().is_none()));
+        assert!(!cx.read(|cx| cx.has_global::<PlatformQuitRequested>()));
+
+        main.update(cx, |_, window, _| window.remove_window()).unwrap();
+
+        assert!(cx.windows().is_empty());
+        assert!(cx.read(|cx| cx.has_global::<PlatformQuitRequested>()),
+            "closing the last window without a reporter must request platform exit synchronously");
+
+        // Let any spawned work register its timers without advancing the test clock.
+        cx.run_until_parked();
+        assert!(!cx.dispatcher.scheduler().has_pending_tasks(),
+            "closing without a reporter must leave no shutdown timer pending");
+        assert!(REPORTER.get().is_none(), "the reporter should remain uninitialised");
+    }
+
+    const SHUTDOWN_TEST_POSITION: f64 = 85.375;
+    const SHUTDOWN_TEST_DURATION: f64 = 464.0;
+
+    fn open_main_window_with_watch_history(
+        cx: &mut TestAppContext,
+        video_id: &str,
+    ) -> (WindowHandle<Empty>, Receiver<Event>) {
+        let (sender, reports) = std::sync::mpsc::channel();
+        TEST_POSITION_REPORTS.with(|slot| slot.replace(Some(sender)));
+        cx.on_quit(|| {
+            TEST_POSITION_REPORTS.with(|slot| slot.take());
+        });
+
+        let video = VideoItem { id: video_id.into(), ..Default::default() };
+        crate::store::history_add(&video);
+        crate::store::history_progress(video_id, 80.0, SHUTDOWN_TEST_DURATION);
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            cx.set_global(Pal::new(true, 0x3ea6ff));
+            cx.set_global(UiState::default());
+            controller::init(cx);
+            controller::player(cx).update(cx, |player, _| {
+                player.video = Some(video);
+                player.time = SHUTDOWN_TEST_POSITION;
+                player.duration = SHUTDOWN_TEST_DURATION;
+                player.paused = false;
+            });
+            crate::register_window_close_handler(cx);
+        });
+        (cx.add_window(|_, _| Empty), reports)
+    }
+
+    fn assert_final_report_before_flush(cx: &TestAppContext, reports: &Receiver<Event>, video_id: &str) {
+        take_final_report_and_flush(reports, video_id).send(()).unwrap();
+        cx.run_until_parked();
+        assert!(matches!(reports.try_recv(), Err(TryRecvError::Empty)),
+            "expected exactly one final report followed by one flush");
+    }
+
+    fn take_final_report_and_flush(reports: &Receiver<Event>, video_id: &str) -> oneshot::Sender<()> {
+        let saved = crate::store::progress_map()[video_id];
+        assert_eq!(saved, (SHUTDOWN_TEST_POSITION, SHUTDOWN_TEST_DURATION));
+        assert!(matches!(reports.try_recv(),
+            Ok(Event::Stop { id, t }) if id == video_id && t == saved.0));
+        let Ok(Event::Flush(flushed)) = reports.try_recv() else {
+            panic!("closing the last main window must flush after the final report");
+        };
+        flushed
+    }
 }
 
 #[cfg(test)]
 mod host_tests {
-    use super::is_youtube_https;
+    use super::first_party_stats_url;
 
-    #[::core::prelude::v1::test]
-    fn only_youtube() {
-        assert!(is_youtube_https("https://s.youtube.com/api/stats/playback?x=1"));
-        assert!(is_youtube_https("https://www.youtube.com/api/stats/watchtime"));
-        assert!(!is_youtube_https("http://s.youtube.com/api"));
-        assert!(!is_youtube_https("https://youtube.com.evil.example/api"));
-        assert!(!is_youtube_https("https://www.youtube.com@evil.example/api"));
-        assert!(!is_youtube_https("https://evilyoutube.com/api"));
+    #[test]
+    fn stats_requests_keep_the_tracking_query_on_youtubes_first_party_origin() {
+        assert_eq!(
+            first_party_stats_url("https://s.youtube.com/api/stats/playback?ei=signed%2Fvalue&len=200", "playback").unwrap(),
+            "https://www.youtube.com/api/stats/playback?ei=signed%2Fvalue&len=200",
+        );
+        assert_eq!(
+            first_party_stats_url("https://www.youtube.com/api/stats/watchtime?ei=test", "watchtime").unwrap(),
+            "https://www.youtube.com/api/stats/watchtime?ei=test",
+        );
+    }
+
+    #[test]
+    fn only_expected_youtube_stats_endpoints_are_allowed() {
+        for url in [
+            "http://s.youtube.com/api/stats/watchtime",
+            "https://s.youtube.com.evil.example/api/stats/watchtime",
+            "https://www.youtube.com@evil.example/api/stats/watchtime",
+            "https://www.youtube.com/api/stats/playback",
+            "https://www.youtube.com/api/stats/watchtime#fragment",
+            "https://www.youtube.com/api/stats/../stats/watchtime",
+        ] {
+            assert!(first_party_stats_url(url, "watchtime").is_err(), "{url}");
+        }
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod browser_tests {
+    use super::find_macos_browser;
+    use std::{fs, os::unix::fs::PermissionsExt};
+
+    #[test]
+    fn finds_executable_browser_in_macos_app_bundle() {
+        let applications = std::env::temp_dir().join(format!("streamtube-browser-test-{:x}", rand::random::<u64>()));
+        let safari = applications.join("Safari.app/Contents/MacOS/Safari");
+        let brave = applications.join("Brave Browser.app/Contents/MacOS/Brave Browser");
+        for executable in [&safari, &brave] {
+            fs::create_dir_all(executable.parent().unwrap()).unwrap();
+            fs::write(executable, b"").unwrap();
+        }
+        fs::set_permissions(&safari, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(&brave, fs::Permissions::from_mode(0o600)).unwrap();
+        let before = find_macos_browser(&applications, None);
+        fs::set_permissions(&brave, fs::Permissions::from_mode(0o700)).unwrap();
+        let after = find_macos_browser(&applications, None);
+        fs::remove_dir_all(&applications).unwrap();
+
+        assert!(before.is_none());
+        assert_eq!(after, Some(("Brave".into(), brave)));
     }
 }
 

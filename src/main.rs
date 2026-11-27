@@ -18,6 +18,57 @@ mod ui;
 mod updater;
 
 use gpui_kit::*;
+use std::time::Duration;
+
+struct QuitRequested;
+impl Global for QuitRequested {}
+
+#[cfg(test)]
+struct PlatformQuitRequested;
+#[cfg(test)]
+impl Global for PlatformQuitRequested {}
+
+fn quit_platform(cx: &mut App) {
+    // GPUI's headless platform ignores quit requests, so record the call here in tests.
+    #[cfg(test)]
+    cx.set_global(PlatformQuitRequested);
+    cx.quit();
+}
+
+pub(crate) fn request_quit(cx: &mut App) {
+    if cx.try_global::<QuitRequested>().is_some() {
+        return;
+    }
+    cx.set_global(QuitRequested);
+    player::controller::player(cx).update(cx, |player, cx| player.stop(cx));
+
+    let Some(flushed) = api::web::flush_watch_reports() else {
+        quit_platform(cx);
+        return;
+    };
+    // Wait before starting platform shutdown, whose quit observers have a
+    // shorter deadline than an ordinary network round trip.
+    cx.spawn(async move |cx| {
+        let deadline = cx.background_executor().timer(Duration::from_secs(3));
+        let _ = futures::future::select(flushed, deadline).await;
+        let _ = cx.update(quit_platform);
+    })
+    .detach();
+}
+
+fn register_window_close_handler(cx: &mut App) {
+    // On Windows and Linux, GPUI otherwise quits on the last window close before the flush can finish.
+    cx.set_quit_mode(QuitMode::Explicit);
+    cx.on_window_closed(|cx, id| {
+        ui::pip::window_closed(id, cx);
+        // The picture-in-picture window alone doesn't keep the app running.
+        let pip = ui::pip::handle(cx);
+        if cx.windows().iter().all(|w| Some(*w) == pip) {
+            request_quit(cx);
+        }
+    })
+    .detach();
+}
 
 /// Window placement from the last session (size, position, maximized), or a
 /// centered default sized to the screen.
@@ -167,15 +218,6 @@ fn main() {
             }
         })
         .detach();
-        cx.on_window_closed(|cx, id| {
-            ui::pip::window_closed(id, cx);
-            // the picture-in-picture window alone doesn't keep the app running
-            let pip = ui::pip::handle(cx);
-            if cx.windows().iter().all(|w| Some(*w) == pip) {
-                player::controller::player(cx).update(cx, |p, _| p.save_progress(true));
-                cx.quit();
-            }
-        })
-        .detach();
+        register_window_close_handler(cx);
     });
 }

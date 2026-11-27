@@ -3,6 +3,8 @@ pub mod auth;
 pub mod http;
 pub mod innertube;
 pub mod json;
+#[cfg(target_os = "macos")]
+pub mod safari;
 pub mod services;
 pub mod streams;
 pub mod types;
