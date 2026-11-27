@@ -1169,10 +1169,10 @@ impl SettingsPage {
             .child(row("Stream Tube", &tf!("Version {0}", env!("CARGO_PKG_VERSION")), div(), cx))
             .child(row("Video engine", video_engine, div(), cx))
             .child(row("yt-dlp", self.ytdlp_version.as_deref().unwrap_or("not installed"), div(), cx))
-            .when(cfg!(target_os = "macos"), |card| {
+            .when(cfg!(target_os = "macos") && !crate::updater::CAN_SELF_UPDATE, |card| {
                 card.child(row("Updates", "Local macOS build. Rebuild from source to update.", div(), cx))
             })
-            .when(!cfg!(target_os = "macos"), |card| {
+            .when(!cfg!(target_os = "macos") || crate::updater::CAN_SELF_UPDATE, |card| {
                 use crate::updater::Status;
                 let status = cx.default_global::<crate::updater::Updates>().status.clone();
                 let text = match &status {

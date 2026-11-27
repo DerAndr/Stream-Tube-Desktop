@@ -3,7 +3,9 @@ name: macOS Intel build
 on:
   push:
     branches: [macos-intel]
+    paths: ["src/**", "Cargo.toml", "Cargo.lock", "build.rs", "assets/**", "packaging/macos/**", ".github/workflows/macos-intel.yml"]
   workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: write
@@ -17,6 +19,8 @@ jobs:
     runs-on: macos-15-intel
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: macos-intel
 
       - name: Install Rust
         run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
@@ -69,8 +73,10 @@ jobs:
           sudo mv /opt/local /opt/local.hidden
           /usr/bin/python3 -c "import ctypes,sys; l=ctypes.CDLL(sys.argv[1]); v=l.mpv_client_api_version(); print('libmpv client API', v>>16, v&0xffff); h=l.mpv_create(); assert h; print('mpv_create OK')" "$fw/libmpv.2.dylib"
           sudo mv /opt/local.hidden /opt/local
+          cargo test --release --locked --bin streamtube updater::tests::
           version=$(cargo metadata --format-version 1 --no-deps --locked | plutil -extract packages.0.version raw -o - -)
           echo "VERSION=$version" >> "$GITHUB_ENV"
+          echo "TARGET_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
           ditto -c -k --sequesterRsrc --keepParent "$bundle" "dist/StreamTube-$version-macos-x86_64-UNOFFICIAL.zip"
 
       - uses: actions/upload-artifact@v4
@@ -84,8 +90,17 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           tag="intel-v${VERSION}"
+          cat > /tmp/release-notes.md <<EOF
+          Unofficial standalone **Stream Tube ${VERSION}** build for **macOS Intel (\`x86_64\`)**.
+
+          - **Self-contained \`.app\`:** \`libmpv\` and its runtime dependencies are bundled inside \`Contents/Frameworks\` — no Homebrew or external \`mpv\` installation needed.
+          - **One-click in-app updates:** checks this repository's releases at startup and updates \`/Applications/Stream Tube.app\` directly from *Settings → About → Update*.
+          - **Intel Iris Plus playback fixes:** restricts \`VideoToolbox\` hardware decode to \`h264,hevc\` to avoid the macOS VP9 \`VTDecompressionSession\` hang while keeping zero-copy \`OpenGL → IOSurface → Metal\` rendering, and dispatches \`mpv\` property changes asynchronously.
+          - **Full engineering write-up:** [\`docs/MACOS_INTEL_BUILD.md\`](https://github.com/DerAndr/Stream-Tube-Desktop/blob/macos-intel/docs/MACOS_INTEL_BUILD.md)
+          EOF
+          sed -i '' 's/^          //' /tmp/release-notes.md
           gh release delete "$tag" --yes --cleanup-tag || true
           gh release create "$tag" dist/*-macos-x86_64-UNOFFICIAL.zip \
-            --target "$GITHUB_SHA" --prerelease \
+            --target "$TARGET_SHA" --prerelease \
             --title "Stream Tube ${VERSION} — macOS Intel (unofficial)" \
-            --notes "Unofficial x86_64 build for Intel Macs. libmpv is bundled, nothing else to install (yt-dlp optional, for downloads). Not notarised: right-click → Open on first launch."
+            --notes-file /tmp/release-notes.md

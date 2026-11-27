@@ -1,0 +1,71 @@
+name: Sync upstream & build Intel
+
+on:
+  schedule:
+    # Check upstream every day at 06:15 UTC
+    - cron: "15 6 * * *"
+  workflow_dispatch:
+    inputs:
+      force_build:
+        description: "Rebuild even if there are no new upstream commits"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    outputs:
+      should_build: ${{ steps.merge.outputs.should_build }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: macos-intel
+          fetch-depth: 0
+
+      - name: Fetch and merge upstream community/macos-apple-silicon
+        id: merge
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream https://github.com/Avaneesh-Inamdar/Stream-Tube-Desktop.git
+          git fetch upstream community/macos-apple-silicon
+          upstream_sha=$(git rev-parse FETCH_HEAD)
+          echo "Upstream community/macos-apple-silicon is at $upstream_sha"
+
+          if git merge-base --is-ancestor "$upstream_sha" HEAD; then
+            echo "macos-intel already contains $upstream_sha."
+            if [ "${{ inputs.force_build }}" = "true" ]; then
+              echo "should_build=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "should_build=false" >> "$GITHUB_OUTPUT"
+            fi
+            exit 0
+          fi
+
+          if git merge --no-edit FETCH_HEAD -m "chore(sync): merge upstream community/macos-apple-silicon ($upstream_sha)"; then
+            git push origin macos-intel
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+          else
+            git merge --abort || true
+            existing=$(gh issue list --state open --search "Upstream merge conflict in:title" --json number -q '.[0].number')
+            if [ -z "$existing" ]; then
+              gh issue create \
+                --title "Upstream merge conflict with community/macos-apple-silicon" \
+                --body "Automatic sync could not cleanly merge \`$upstream_sha\` from \`Avaneesh-Inamdar/Stream-Tube-Desktop:community/macos-apple-silicon\` into \`macos-intel\`. Resolve the conflict on \`macos-intel\` and push."
+            fi
+            exit 1
+          fi
+
+  build-intel:
+    needs: sync
+    if: needs.sync.outputs.should_build == 'true'
+    uses: ./.github/workflows/macos-intel.yml
+    permissions:
+      contents: write
