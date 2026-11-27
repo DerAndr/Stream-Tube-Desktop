@@ -31,7 +31,7 @@ jobs:
       # and is bundled into the .app (users don't need to install mpv).
       - name: Install MacPorts, libmpv and dylibbundler
         run: |
-          curl -fsSLO https://github.com/macports/macports-base/releases/download/v2.12.7/MacPorts-2.12.7-15-Sequoia.pkg
+          curl -fsSLO --retry 5 --retry-all-errors --connect-timeout 20 https://github.com/macports/macports-base/releases/download/v2.12.7/MacPorts-2.12.7-15-Sequoia.pkg
           sudo installer -pkg MacPorts-2.12.7-15-Sequoia.pkg -target /
           export PATH="/opt/local/bin:/opt/local/sbin:$PATH"
           sudo port -N selfupdate
