@@ -17,6 +17,11 @@
   <img src="https://img.shields.io/badge/license-MIT-green" alt="MIT license">
 </p>
 
+> [!IMPORTANT]
+> **macOS Intel (`x86_64`) standalone fork with bundled `libmpv` & one-click self-updater**
+> - **Download ready-to-run `.app` for Intel Macs:** [Releases → `intel-v0.7.5-alpha`](https://github.com/DerAndr/Stream-Tube-Desktop/releases/tag/intel-v0.7.5-alpha) (`libmpv` and its dependencies are bundled inside `Stream Tube.app` — no Homebrew or `mpv` installation required).
+> - **Engineering write-up (what, how, and why):** [**`docs/MACOS_INTEL_BUILD.md`**](docs/MACOS_INTEL_BUILD.md) — bypassing Homebrew's dropped `x86_64` bottles via MacPorts + `dylibbundler`, fixing duplicate `LC_RPATH` entries for `dyld`, diagnosing macOS `.hang` stackshots on MacBook Pro 13" (`A2251`, Intel Iris Plus), fixing the `VideoToolbox` VP9 deadlock, and setting up automated upstream sync + in-app self-updates.
+
 > [!WARNING]
 > **Community branch — not maintained or tested by the project owner.**
 > The macOS (Apple Silicon) support on this branch was contributed by
