@@ -65,9 +65,10 @@ fn volume_drag_ends_outside_the_track(cx: &mut TestAppContext) {
     let track = view.read_with(cx, |view, _| view.vol_bounds.get());
     assert!(track.size.width > px(0.0));
     let start = point(track.origin.x + track.size.width * 0.25, track.center().y);
+    // above the track: below it is off the bottom of the window
     let release = point(
         track.origin.x + track.size.width * 0.625,
-        track.bottom() + px(12.0),
+        track.top() - px(12.0),
     );
     let after_release = point(start.x, release.y);
     let modifiers = Modifiers::default();

@@ -208,7 +208,7 @@ impl Render for ChannelPage {
             .flex_col()
             .gap_4()
             .when_some(d.banner.clone(), |el, b| {
-                el.child(div().w_full().h(width / 6.2).rounded_2xl().overflow_hidden().bg(p.surface).child(img(SharedString::from(b)).size_full().object_fit(ObjectFit::Cover)))
+                el.child(div().w_full().h(width / 6.2).rounded_2xl().overflow_hidden().bg(p.surface).child(img(SharedString::from(b)).size_full().rounded_2xl().object_fit(ObjectFit::Cover)))
             })
             .child(
                 div()
@@ -223,15 +223,18 @@ impl Render for ChannelPage {
                             .flex_col()
                             .gap_2()
                             .flex_1()
-                            .child(div().text_3xl().font_weight(FontWeight::BOLD).text_color(p.text).child(d.info.name.clone()))
+                            .child(selectable_text(SharedString::from(format!("ch-name-{}", d.info.id)), d.info.name.clone()).text_3xl().font_weight(FontWeight::BOLD).text_color(p.text))
                             .child(
-                                div().text_sm().text_color(p.text2).child(
-                                    [d.info.handle.clone(), d.info.subscribers_text.clone(), d.info.video_count_text.clone()]
+                                selectable_text(
+                                    SharedString::from(format!("ch-meta-{}", d.info.id)),
+                                    [d.info.handle.clone(), d.info.subscribers_text.clone().filter(|_| !store::settings_snapshot().hide_subscriber_counts), d.info.video_count_text.clone()]
                                         .into_iter()
                                         .flatten()
                                         .collect::<Vec<_>>()
                                         .join(" • "),
-                                ),
+                                )
+                                .text_sm()
+                                .text_color(p.text2),
                             )
                             .when_some(d.info.description.clone().filter(|x| !x.trim().is_empty()), |el, desc| {
                                 // two lines unless opened: some channels write pages here
@@ -247,7 +250,7 @@ impl Render for ChannelPage {
                                         .child(div().text_sm().text_color(p.text2).child(if open || !long {
                                             rich_text("ch-about", desc.trim().to_string(), cx)
                                         } else {
-                                            div().child(short.unwrap_or_default()).into_any_element()
+                                            selectable_text(SharedString::from(format!("ch-about-short-{}", d.info.id)), short.unwrap_or_default()).into_any_element()
                                         }))
                                         .when(long, |d| {
                                             d.child(

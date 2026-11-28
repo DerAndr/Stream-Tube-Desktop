@@ -9,23 +9,21 @@ use serde_json::Value;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+#[path = "updater_intel.rs"]
+mod intel;
+
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
 const REPO: &str = "DerAndr/Stream-Tube-Desktop";
 #[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
 const REPO: &str = "Avaneesh-Inamdar/Stream-Tube-Desktop";
-
 /// Where release files may come from. The project is moving to the StreamTubeProject
 /// organization; once it has, GitHub serves the files from there, so versions from
 /// before the move have to accept both places to keep updating.
-#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
-const RELEASE_REPOS: &[&str] = &[REPO];
-#[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
-const RELEASE_REPOS: &[&str] = &[REPO, "StreamTubeProject/Stream-Tube-Desktop"];
-
+const RELEASE_REPOS: [&str; 2] = [REPO, "StreamTubeProject/Stream-Tube-Desktop"];
 #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
 pub const RELEASES_PAGE: &str = "https://github.com/DerAndr/Stream-Tube-Desktop/releases";
 #[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
 pub const RELEASES_PAGE: &str = "https://github.com/Avaneesh-Inamdar/Stream-Tube-Desktop/releases";
-
 pub const CAN_SELF_UPDATE: bool = cfg!(windows) || cfg!(all(target_os = "macos", target_arch = "x86_64"));
 
 #[derive(Clone, Debug)]
@@ -103,7 +101,7 @@ fn pick_asset(assets: &[Value]) -> Option<Asset> {
         let n = name.to_ascii_lowercase();
         if cfg!(windows) {
             n.ends_with(".exe") && n.contains("setup")
-        } else if cfg!(all(target_os = "macos", target_arch = "x86_64")) {
+        } else if cfg!(all(target_os = "macos", target_arch = "x86_64")) && !cfg!(test) {
             n.contains("macos-x86_64") && n.ends_with(".zip")
         } else {
             n.contains("linux") && (n.ends_with(".tar.gz") || n.ends_with(".appimage"))
@@ -180,7 +178,7 @@ fn set_status(st: Status, cx: &mut App) {
 /// Checks GitHub. `manual` reports "up to date" and errors; the startup check stays
 /// quiet unless there is something new (and not skipped).
 pub fn check_now(manual: bool, cx: &mut App) {
-    if BUSY.swap(true, Ordering::SeqCst) {
+    if matches!(cx.default_global::<Updates>().status, Status::Downloading(_, _)) || BUSY.swap(true, Ordering::SeqCst) {
         return;
     }
     set_status(Status::Checking, cx);
@@ -281,38 +279,7 @@ pub fn install(cx: &mut App) {
                 anyhow::bail!("the download doesn't match the release's checksum");
             }
             #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
-            {
-                let unpacked = dir.join("unpacked");
-                let _ = std::fs::remove_dir_all(&unpacked);
-                std::fs::create_dir_all(&unpacked)?;
-                let st = std::process::Command::new("/usr/bin/ditto")
-                    .args(["-x", "-k"])
-                    .arg(&path)
-                    .arg(&unpacked)
-                    .status()
-                    .context("failed to unpack update archive")?;
-                let _ = std::fs::remove_file(&path);
-                if !st.success() {
-                    anyhow::bail!("failed to unpack the update archive");
-                }
-                let staged = unpacked.join("Stream Tube.app");
-                if !staged.join("Contents/MacOS/streamtube").is_file() {
-                    anyhow::bail!("Stream Tube.app was not found inside the update archive");
-                }
-                let _ = std::process::Command::new("/usr/bin/xattr").arg("-cr").arg(&staged).status();
-                let _ = std::process::Command::new("/bin/chmod").arg("-R").arg("a+rX").arg(&staged).status();
-                let ok = std::process::Command::new("/usr/bin/codesign")
-                    .args(["--verify", "--deep", "--strict"])
-                    .arg(&staged)
-                    .status()
-                    .map(|s| s.success())
-                    .unwrap_or(false);
-                if !ok {
-                    anyhow::bail!("the downloaded app bundle failed signature verification");
-                }
-                return Ok(staged);
-            }
-            #[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
+            let path = intel::stage_bundle(&dir, &path)?;
             Ok(path)
         })();
         *r2.lock() = Some(res);
@@ -328,7 +295,7 @@ pub fn install(cx: &mut App) {
             cx.update(|cx| set_status(Status::Downloading(rel2, p), cx));
         };
         cx.update(|cx| match res {
-            Ok(path) => run_installer(&path, cx),
+            Ok(path) => run_installer(&path, rel, cx),
             Err(e) => {
                 set_status(Status::Available(rel), cx);
                 toast(cx, tf!("Update failed: {0}", e));
@@ -338,74 +305,68 @@ pub fn install(cx: &mut App) {
     .detach();
 }
 
-fn run_installer(path: &std::path::Path, cx: &mut App) {
+fn installer_command(path: &std::path::Path, executable: Option<&std::path::Path>) -> std::process::Command {
     #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
-    {
-        let bundle = std::env::current_exe()
-            .ok()
-            .and_then(|exe| exe.parent()?.parent()?.parent().map(std::path::Path::to_path_buf))
-            .filter(|b| b.extension().and_then(|e| e.to_str()) == Some("app"));
-        let Some(target) = bundle else {
-            toast(cx, "Run Stream Tube from its .app bundle to install updates automatically");
-            return;
-        };
-        let pid = std::process::id().to_string();
-        let script = r#"
-target="$1"; staged="$2"; pid="$3"
-i=0
-while kill -0 "$pid" 2>/dev/null && [ $i -lt 50 ]; do
-  sleep 0.2
-  i=$((i+1))
-done
-if rm -rf "$target" 2>/dev/null && mv "$staged" "$target" 2>/dev/null; then
-  chgrp -R admin "$target" 2>/dev/null || true
-  /usr/bin/open "$target"
-else
-  /usr/bin/osascript \
-    -e 'on run argv' \
-    -e 'do shell script "rm -rf " & quoted form of item 1 of argv & " && mv " & quoted form of item 2 of argv & " " & quoted form of item 1 of argv & " && chown -R root:admin " & quoted form of item 1 of argv with administrator privileges' \
-    -e 'end run' "$target" "$staged" && /usr/bin/open "$target"
-fi
-"#;
-        match std::process::Command::new("/bin/sh")
-            .arg("-c")
-            .arg(script)
-            .arg("streamtube-updater")
-            .arg(&target)
-            .arg(path)
-            .arg(&pid)
-            .spawn()
-        {
-            Ok(_) => {
-                store::kv_set("update_skip", "");
-                cx.quit();
-            }
-            Err(e) => toast(cx, tf!("Could not start the installer: {0}", e)),
-        }
-        return;
+    if !cfg!(test) {
+        return intel::installer_command(path, executable);
     }
-    #[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
-    {
-        let mut c = std::process::Command::new(path);
-        c.args(["/SILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/CLOSEAPPLICATIONS", "/RESTARTAPPLICATIONS"]);
-        match c.spawn() {
-            Ok(_) => {
-                store::kv_set("update_skip", "");
-                cx.quit();
-            }
-            Err(e) => toast(cx, tf!("Could not start the installer: {0}", e)),
+    let mut command = std::process::Command::new(path);
+    command.args(["/SP-", "/SILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/CLOSEAPPLICATIONS", "/RESTARTAPPLICATIONS"]);
+    if let Some(dir) = executable.and_then(portable_dir) {
+        let mut destination = std::ffi::OsString::from("/DIR=");
+        destination.push(dir);
+        command.arg("/PORTABLEUPDATE=1").arg(destination);
+    }
+    command
+}
+
+fn portable_dir(executable: &std::path::Path) -> Option<&std::path::Path> {
+    let dir = executable.parent()?;
+    let name = executable.file_name()?.to_str()?;
+    let portable = dir.join("streamtube.portable").is_file() || dir.join("README.md").is_file();
+    (name.eq_ignore_ascii_case("streamtube.exe") && portable && dir.join("libmpv-2.dll").is_file()).then_some(dir)
+}
+
+fn run_installer(path: &std::path::Path, rel: Release, cx: &mut App) {
+    let executable = std::env::current_exe().ok();
+    let mut command = installer_command(path, executable.as_deref());
+    match command.spawn() {
+        Ok(_) => {
+            store::kv_set("update_skip", "");
+            crate::flush_watch_history(cx);
+            cx.quit();
+        }
+        Err(e) => {
+            set_status(Status::Available(rel), cx);
+            toast(cx, tf!("Could not start the installer: {0}", e));
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{is_newer, pick_asset};
+    use super::{installer_command, is_newer, pick_asset};
+
+    #[test]
+    fn portable_update_targets_the_running_copy() {
+        let dir = crate::store::data_dir().join("Папка Stream Tube");
+        std::fs::create_dir_all(&dir).unwrap();
+        let executable = dir.join("streamtube.exe");
+        let setup = std::path::Path::new("update-setup.exe");
+        std::fs::write(dir.join("libmpv-2.dll"), []).unwrap();
+        assert!(!installer_command(setup, Some(&executable)).get_args().any(|arg| arg == "/PORTABLEUPDATE=1"));
+
+        // ZIPs released before the marker shipped include the README.
+        std::fs::write(dir.join("README.md"), []).unwrap();
+        let command = installer_command(setup, Some(&executable));
+        let mut destination = std::ffi::OsString::from("/DIR=");
+        destination.push(dir);
+        assert!(command.get_args().any(|arg| arg == "/PORTABLEUPDATE=1"));
+        assert!(command.get_args().any(|arg| arg == destination));
+    }
     #[test]
     fn versions() {
         assert!(is_newer("v0.1.0", "0.1.0-alpha"));
-        assert!(is_newer("intel-v0.7.6-alpha", "0.7.5-alpha"));
-        assert!(!is_newer("intel-v0.7.5-alpha", "0.7.5-alpha"));
         assert!(is_newer("v0.1.0-beta", "0.1.0-alpha"));
         assert!(is_newer("v0.1.0-alpha.2", "0.1.0-alpha"));
         assert!(is_newer("v0.2.0-alpha", "0.1.0"));
@@ -415,13 +376,7 @@ mod tests {
 
     #[test]
     fn assets_come_from_this_repo_with_a_checksum() {
-        let ext = if cfg!(windows) {
-            "setup.exe"
-        } else if cfg!(all(target_os = "macos", target_arch = "x86_64")) {
-            "macos-x86_64-UNOFFICIAL.zip"
-        } else {
-            "linux-x86_64.tar.gz"
-        };
+        let ext = if cfg!(windows) { "setup.exe" } else { "linux-x86_64.tar.gz" };
         let asset = |name: &str, url: &str| {
             serde_json::json!({ "name": name, "browser_download_url": url, "size": 5, "digest": format!("sha256:{}", "AB".repeat(32)) })
         };
@@ -431,12 +386,9 @@ mod tests {
         // another repository, or a name that is a path
         assert!(pick_asset(&[asset(&good, &format!("https://github.com/someone/else/releases/download/v1.0.0/{good}"))]).is_none());
         assert!(pick_asset(&[asset(&format!("..\\{good}"), &format!("https://github.com/{}/releases/download/v1.0.0/x", super::REPO))]).is_none());
-        #[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
-        {
-            // the organization the project is moving to, but not names that only start the same
-            assert!(pick_asset(&[asset(&good, &format!("https://github.com/StreamTubeProject/Stream-Tube-Desktop/releases/download/v1.0.0/{good}"))]).is_some());
-            assert!(pick_asset(&[asset(&good, &format!("https://github.com/StreamTubeProject/Stream-Tube-Desktop-fork/releases/download/v1.0.0/{good}"))]).is_none());
-            assert!(pick_asset(&[asset(&good, &format!("https://github.com/StreamTubeProjectX/Stream-Tube-Desktop/releases/download/v1.0.0/{good}"))]).is_none());
-        }
+        // the organization the project is moving to, but not names that only start the same
+        assert!(pick_asset(&[asset(&good, &format!("https://github.com/StreamTubeProject/Stream-Tube-Desktop/releases/download/v1.0.0/{good}"))]).is_some());
+        assert!(pick_asset(&[asset(&good, &format!("https://github.com/StreamTubeProject/Stream-Tube-Desktop-fork/releases/download/v1.0.0/{good}"))]).is_none());
+        assert!(pick_asset(&[asset(&good, &format!("https://github.com/StreamTubeProjectX/Stream-Tube-Desktop/releases/download/v1.0.0/{good}"))]).is_none());
     }
 }

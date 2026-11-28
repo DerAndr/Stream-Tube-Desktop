@@ -33,6 +33,13 @@ fn port_file() -> std::path::PathBuf {
     crate::store::data_dir().join("instance")
 }
 
+/// Whether another copy of the app is running, going by the file it wrote at start.
+pub fn other_instance_running() -> bool {
+    let Ok(s) = std::fs::read_to_string(port_file()) else { return false };
+    let pid = s.split_whitespace().nth(1).and_then(|p| p.parse::<u32>().ok());
+    pid.is_some_and(|p| p != std::process::id() && process_alive(p))
+}
+
 /// Hands `arg` to an already running instance. True when one took it (this process should exit).
 pub fn forward_to_running(arg: &str) -> bool {
     let Ok(s) = std::fs::read_to_string(port_file()) else { return false };
@@ -149,7 +156,7 @@ pub fn listen(tx: futures::channel::mpsc::UnboundedSender<String>) -> std::io::R
                 continue;
             }
             // only our own launches speak this, and know the secret
-            let Some(arg) = line.trim_end_matches(['\r', '\n']).strip_prefix("STREAMTUBE ").and_then(|rest| check_token(rest, &token)) else { continue };
+            let Some(arg) = parse_request(&line, &token) else { continue };
             let _ = (&stream).write_all(b"ok\n");
             if tx.unbounded_send(arg.to_string()).is_err() {
                 break;
@@ -157,6 +164,11 @@ pub fn listen(tx: futures::channel::mpsc::UnboundedSender<String>) -> std::io::R
         }
     });
     Ok(())
+}
+
+fn parse_request<'a>(line: &'a str, token: &str) -> Option<&'a str> {
+    let payload = line.trim_end_matches(['\r', '\n']).strip_prefix("STREAMTUBE ")?;
+    check_token(payload, token)
 }
 
 /// A random secret for the loopback link port.
@@ -185,6 +197,13 @@ mod tests {
         assert_eq!(super::check_token("https://youtu.be/abc", &token), None);
         assert_eq!(super::check_token(&format!("{} https://youtu.be/abc", "0".repeat(64)), &token), None);
         assert_ne!(super::new_token(), token);
+    }
+
+    #[test]
+    fn launch_without_a_url_is_forwarded_to_the_running_instance() {
+        let token = super::new_token();
+        assert_eq!(super::parse_request(&format!("STREAMTUBE {token} \n"), &token), Some(""));
+        assert_eq!(super::parse_request(&format!("STREAMTUBE {token}\n"), &token), None);
     }
 
     #[test]

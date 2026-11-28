@@ -54,11 +54,11 @@ jobs:
             echo "should_build=true" >> "$GITHUB_OUTPUT"
           else
             git merge --abort || true
-            existing=$(gh issue list --state open --search "Upstream merge conflict in:title" --json number -q '.[0].number')
+            existing=$(gh issue list --state open --search "Upstream merge conflict in:title" --json number -q '.[0].number' || true)
             if [ -z "$existing" ]; then
               gh issue create \
                 --title "Upstream merge conflict with community/macos-apple-silicon" \
-                --body "Automatic sync could not cleanly merge \`$upstream_sha\` from \`Avaneesh-Inamdar/Stream-Tube-Desktop:community/macos-apple-silicon\` into \`macos-intel\`. Resolve the conflict on \`macos-intel\` and push."
+                --body "Automatic sync could not cleanly merge \`$upstream_sha\` from \`Avaneesh-Inamdar/Stream-Tube-Desktop:community/macos-apple-silicon\` into \`macos-intel\`. Resolve the conflict on \`macos-intel\` and push." || true
             fi
             exit 1
           fi

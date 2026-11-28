@@ -40,6 +40,10 @@ impl Mode {
             _ => Mode::Original,
         }
     }
+
+    pub fn without_zoom(self) -> Self {
+        if self == Mode::Fill { Mode::Original } else { self }
+    }
 }
 
 /// The setting after `cur` in `MODES`, for the shortcut that cycles through them.
@@ -63,6 +67,11 @@ pub struct Region {
 
 impl Region {
     pub const FULL: Region = Region { x: 0.0, y: 0.0, w: 1.0, h: 1.0 };
+
+    /// The rectangle occupied by this region within a positioned frame.
+    pub fn in_frame(self, (x, y, w, h): (f32, f32, f32, f32)) -> (f32, f32, f32, f32) {
+        (x + self.x * w, y + self.y * h, self.w * w, self.h * h)
+    }
 
     /// The same part with `trim` (fractions of the frame) taken off each side.
     fn trimmed(self, trim: (f32, f32)) -> Region {
@@ -287,6 +296,22 @@ mod tests {
         assert!((w / h - 16.0 / 9.0).abs() < 0.01);
         let (r, fit) = resolve(Mode::Stretch, (1920.0, 1080.0), (1920.0, 1080.0), (0.0, 0.0));
         assert!(close(layout(area, (1920.0, 1080.0), r, fit), (0.0, 0.0, 3440.0, 1440.0)));
+    }
+
+    #[test]
+    fn full_height_fits_each_aspect_mode() {
+        let frame = (1920.0, 1080.0);
+        let area = (1600.0, 1080.0);
+        let trim = (0.0, 0.125);
+        for &(value, _) in MODES {
+            let mode = Mode::parse(value);
+            let (region, _) = resolve(mode, frame, frame, trim);
+            let (visible, fit) = resolve(mode.without_zoom(), frame, frame, trim);
+            assert_eq!(visible, region, "{value}");
+            let actual = visible.in_frame(layout(area, frame, visible, fit));
+            let h = if mode == Mode::Stretch { area.1 } else { area.0 * (region.h * frame.1) / (region.w * frame.0) };
+            assert!(close(actual, (0.0, (area.1 - h) / 2.0, area.0, h)), "{value}");
+        }
     }
 
     #[test]

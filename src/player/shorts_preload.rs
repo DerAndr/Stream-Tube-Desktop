@@ -339,7 +339,7 @@ pub(super) fn hls_opening_seconds(url: &str, quality: u32, audio: Option<&str>) 
     if let Some(seconds) = master.opening_seconds {
         return Some(seconds);
     }
-    let selected = proxy::select_master(std::str::from_utf8(&master.bytes).ok()?, quality, audio)?;
+    let selected = proxy::select_master(std::str::from_utf8(&master.bytes).ok()?, quality, audio, false)?;
     let mut seconds = f64::INFINITY;
     for uri in rendition_uris(&selected) {
         seconds = seconds.min(cached(&proxy::playlist_url(url, &uri)?)?.opening_seconds?);
@@ -357,11 +357,11 @@ fn preload(id: &str, assets: Weak<Assets>, quality: u32, audio_only: bool) -> Op
         return Some(());
     }
     let codec = &crate::store::settings_snapshot().codec_pref;
-    let formats = match streams::playback_stream(&info, quality, codec, None, audio_only)? {
+    let formats = match streams::playback_stream(&info, quality, codec, None, audio_only, false)? {
         streams::PlaybackStream::Hls(url) => {
             let master = download.playlist(url)?;
             let audio = streams::hls_audio_choice(&info, None);
-            if let Some(selected) = proxy::select_master(&master, quality, audio.as_deref()) {
+            if let Some(selected) = proxy::select_master(&master, quality, audio.as_deref(), false) {
                 for uri in rendition_uris(&selected) {
                     let variant = proxy::playlist_url(url, &uri)?;
                     download.opening_segments(&variant, &download.playlist(&variant)?)?;

@@ -2,10 +2,10 @@
 
 This document explains **what, how, and why** was done in [`DerAndr/Stream-Tube-Desktop`](https://github.com/DerAndr/Stream-Tube-Desktop) to ship a fully self-contained **Stream Tube** build for **Intel (`x86_64`) Macs**, along with the runtime issues diagnosed and fixed on real hardware (**MacBook Pro 13" 2020, `A2251` / `MacBookPro16,2`, 10th-Gen Intel Core + Intel Iris Plus, macOS 26 Tahoe**).
 
-- **Latest Intel release:** [`intel-v0.7.5-alpha`](https://github.com/DerAndr/Stream-Tube-Desktop/releases/tag/intel-v0.7.5-alpha) (`StreamTube-0.7.5-alpha-macos-x86_64-UNOFFICIAL.zip`)
+- **Intel releases:** [`DerAndr/Stream-Tube-Desktop/releases`](https://github.com/DerAndr/Stream-Tube-Desktop/releases) (`StreamTube-<version>-macos-x86_64-UNOFFICIAL.zip`)
 - **Build workflow:** [`.github/workflows/macos-intel.yml`](../.github/workflows/macos-intel.yml)
 - **Automated upstream sync workflow:** [`.github/workflows/sync-upstream.yml`](../.github/workflows/sync-upstream.yml)
-- **Playback & self-updater changes:** [`src/player/controller.rs`](../src/player/controller.rs), [`src/player/mpv.rs`](../src/player/mpv.rs), [`src/updater.rs`](../src/updater.rs)
+- **Playback & self-updater changes:** [`src/updater_intel.rs`](../src/updater_intel.rs), [`src/updater.rs`](../src/updater.rs) (playback fixes merged upstream in [#244](https://github.com/Avaneesh-Inamdar/Stream-Tube-Desktop/pull/244) & [#245](https://github.com/Avaneesh-Inamdar/Stream-Tube-Desktop/pull/245))
 
 ---
 

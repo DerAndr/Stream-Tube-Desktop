@@ -181,7 +181,7 @@ fn animated(bytes: &[u8]) -> Option<smallvec::SmallVec<[image::Frame; 1]>> {
 }
 
 /// Decoded images above this are freed, least recently shown first.
-const BUDGET_BYTES: usize = 96 * 1024 * 1024;
+const BUDGET_BYTES: usize = 48 * 1024 * 1024;
 
 struct Entry {
     item: Slot,

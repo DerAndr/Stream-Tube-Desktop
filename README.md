@@ -19,7 +19,7 @@
 
 > [!IMPORTANT]
 > **macOS Intel (`x86_64`) standalone fork with bundled `libmpv` & one-click self-updater**
-> - **Download ready-to-run `.app` for Intel Macs:** [Releases → `intel-v0.7.5-alpha`](https://github.com/DerAndr/Stream-Tube-Desktop/releases/tag/intel-v0.7.5-alpha) (`libmpv` and its dependencies are bundled inside `Stream Tube.app` — no Homebrew or `mpv` installation required).
+> - **Download ready-to-run `.app` for Intel Macs:** [Releases (`intel-v*`)](https://github.com/DerAndr/Stream-Tube-Desktop/releases) (`libmpv` and its dependencies are bundled inside `Stream Tube.app` — no Homebrew or `mpv` installation required).
 > - **Engineering write-up (what, how, and why):** [**`docs/MACOS_INTEL_BUILD.md`**](docs/MACOS_INTEL_BUILD.md) — bypassing Homebrew's dropped `x86_64` bottles via MacPorts + `dylibbundler`, fixing duplicate `LC_RPATH` entries for `dyld`, diagnosing macOS `.hang` stackshots on MacBook Pro 13" (`A2251`, Intel Iris Plus), fixing the `VideoToolbox` VP9 deadlock, and setting up automated upstream sync + in-app self-updates.
 
 > [!WARNING]
@@ -40,7 +40,7 @@
 
 I wanted YouTube on my desktop without keeping a browser tab open, and without the
 ads, autoplaying junk and sponsor reads. The existing options were either Electron
-apps that eat a gigabyte of RAM or web frontends that break every other week.
+apps or web frontends that break every other week.
 Stream Tube is a single native app: the UI is drawn on the GPU with
 [GPUI](https://github.com/zed-industries/zed/tree/main/crates/gpui), and video
 goes through libmpv, so it starts fast and scrolls smoothly even with big feeds.
@@ -54,7 +54,8 @@ goes through libmpv, so it starts fast and scrolls smoothly even with big feeds.
 - Nothing to install or keep updated: it isn't an ad blocker that YouTube can break, ads simply aren't part of how the app plays video
 
 **Watching**
-- Home, Shorts, Subscriptions, Explore categories, channels (including their courses and shows), playlists and search, with search suggestions and your recent searches
+- Home, Shorts, Subscriptions, Explore categories, channels (including their courses and shows), and playlists
+- Search with filters, suggestions, recent searches and more results as you scroll
 - A personal Home without an account: "For you" recommends videos related to what you've watched and searched in the app, mixed with new uploads from your subscriptions. Signed in, Home is your own YouTube Home feed
 - A *Recently uploaded* chip on Home, like youtube.com's: videos from your Home feed and subscriptions uploaded in the last two weeks, newest first
 - Hover a video title in a grid or list to read the full title
@@ -68,8 +69,15 @@ goes through libmpv, so it starts fast and scrolls smoothly even with big feeds.
 - A chapters panel beside the player, like youtube.com: click the chapter name in the player bar (or *View all* under the description) to list every chapter with its thumbnail, follow the one playing, and jump to any of them
 - Timestamps in descriptions and comments seek the video and bring the player back into view
 - Resumes where you left off, remembers your last quality, autoplays the next video or loops, and plays whole playlists as a queue
-- A miniplayer while you browse that you can drag anywhere and resize (it remembers where you put it), a picture-in-picture window, theater mode and fullscreen. Theater mode is saved between launches and can be set in *Settings → Player*.
+- Turn on *Original video titles* in Settings to show the creator's title when opening a video.
+- Hover over the video to step through available resolutions or adjust playback speed in 0.5× increments. Click the speed to reset it to 1×.
+- The picture-in-picture button opens the draggable in-app miniplayer or a floating window above other apps. Choose the mode in *Settings → Player*. Theater mode and fullscreen are also available, and the app remembers your theater setting.
 - Keeps playing when minimized, or pauses and resumes when you come back. On Windows, active video playback keeps the display awake.
+- Windows media controls can pause playback, resume it and move through the video queue.
+- Music: signed in, *Explore → Music* shows YouTube's music picks for your account, and each song plays on as its mix. Music mode, offered when a mix starts or from the player's note button, works like YouTube Music: a player bar along the bottom of every page and a *Now playing* view with the cover art or the video beside what plays next.
+- On Windows, *Settings → General → Minimize to tray* keeps Stream Tube in the notification area when you minimize or close the window. Use the tray icon to reopen or quit the app.
+- Start *Cast over LAN* in Settings and open the temporary link on a phone on the same trusted network. If the desktop has more than one local address, choose the one on your phone's network. Paste a YouTube video link to play it on the desktop.
+- Turn on *Independent tab playback* and restart Stream Tube to play up to three tabs at once. Each tab keeps its own queue. Background tabs play audio, and a tab with a floating picture-in-picture window keeps showing video there.
 - Live streams with live chat (Top chat or every message), and chatting when signed in
 - Shorts in a vertical player that moves to the next one by itself, or open them in the regular player. Shorts comments open their replies as threads too
 - Hold Space or press and hold the main video to play at 2x
@@ -103,16 +111,18 @@ goes through libmpv, so it starts fast and scrolls smoothly even with big feeds.
 
 **Your data stays yours**
 - Subscriptions can live locally. The feed is built by fetching each channel directly, no account needed
-- Or sign in with your Google account to get your own Home feed, subscriptions, playlists, likes and subscribe button
-- The top-bar **Sign in** label and icon follow your selected accent. Their shade adjusts to maintain at least **4.5:1** contrast at rest and on hover in Light and Dark modes
-- Watch history and search history from your other devices sync in, with resume positions, and single entries can be removed
-- Connect your YouTube history (*Settings → General*) and it works the other way too: videos you watch in Stream Tube show up in your YouTube history, and your phone or TV resumes them where you stopped. You sign in once in a browser window with a fresh profile (Chrome, Edge, Brave or Chromium) that closes and is deleted afterwards, or load a `cookies.txt` file instead
+- Sign in with your Google account to get your own Home feed, subscriptions, playlists, likes and subscribe button. Stream Tube opens youtube.com/activate in your default browser with the sign-in code already filled in, so you only pick your account and allow access. Stream Tube imports your YouTube watch history and recent searches automatically after sign-in
+- Sign in to YouTube to open Watch later, Liked videos and any account Favorites playlist from the sidebar. The local playlists are available in Library.
+- Signed in, videos play through YouTube's TV client as your account: no "confirm you're not a bot" checks, and age-restricted videos play. The JavaScript puzzles in YouTube's stream URLs are solved with the scripts from [yt-dlp/ejs](https://github.com/yt-dlp/ejs) in a built-in QuickJS engine, or in [Deno](https://deno.com) or [Node.js](https://nodejs.org) when one is installed, which is a few times faster
+- Videos you watch in Stream Tube and the positions you stop at go back to your YouTube account through the same sign-in, so other devices resume where you left off. If you prefer, connect a browser session instead under *Settings → General → YouTube watch history*: sign in with a fresh browser profile (Chrome, Edge, Brave or Chromium) that is deleted afterwards, or load a `cookies.txt` file
+- Your YouTube watch history refreshes in the background and when you return to Stream Tube
 - On Apple Silicon, this branch also offers an [experimental Safari watch-history connection](#safari-watch-history-prototype) for a signed-in YouTube tab
 - History, watch later, favourites and playlists are stored in a local SQLite database, and you can pause or clear history at any time
 - Import from YouTube Takeout, NewPipe, FreeTube or OPML. Export to NewPipe JSON, YouTube CSV, OPML or a full backup
 
 **Downloads**
 - Download video or audio in any quality through yt-dlp, with SponsorBlock chapters, from a download manager with progress
+- Save a transcript as plain text (.txt) or timestamped subtitles (.srt) from the Download menu. A single caption track downloads immediately. If several tracks are available, choose the language; automatically generated tracks are labeled in the picker.
 - Without yt-dlp it falls back to the built-in downloader (360p/720p or audio)
 - yt-dlp and FFmpeg can be fetched from inside the app, on Windows and Linux (*Settings → Downloads*), with a progress bar, so nothing has to be installed by hand
 
@@ -123,7 +133,7 @@ goes through libmpv, so it starts fast and scrolls smoothly even with big feeds.
 **Network**
 - A proxy setting (HTTP or SOCKS) that covers browsing, playback, thumbnails, downloads and sign-in
 - On Linux, a choice of Wayland or X11, with an automatic switch to X11 if a Wayland window never shows up (ChromeOS)
-- IPv4-only mode applies to new requests as soon as you change it. You can also choose a playback client (visionOS, Android VR or yt-dlp).
+- IPv4-only mode applies to new requests as soon as you change it. You can also choose a playback client (TV, visionOS, Android VR or yt-dlp).
 
 **Looks the way you like**
 - Dark, light or follow Windows
@@ -135,25 +145,6 @@ goes through libmpv, so it starts fast and scrolls smoothly even with big feeds.
 
 **Keeps itself up to date**
 - Checks for new releases at startup and installs them in one click, and can update yt-dlp for you. Every download is checked against its SHA-256 before it is used
-
-## Performance
-
-Stream Tube versus youtube.com in Microsoft Edge (clean profile, no extensions) on
-the same Windows 11 PC, playing the same video. Numbers are the working set of
-every process involved, after browsing a few pages.
-
-| | youtube.com in Edge | Stream Tube 0.4.0-alpha |
-|---|---|---|
-| Processes | 11–12 | 1 |
-| RAM, idle on Home | 1,073 MB | **~405 MB** |
-| RAM, playing a video | 1,203 MB | **~565 MB** |
-
-Stream Tube uses less than half the RAM of the browser, and it stays flat as you
-browse: thumbnails are kept at the size they're drawn and the ones you've scrolled
-past are freed. While playing, part of the memory is a read-ahead buffer that keeps
-seeking instant. Enable *Settings → Player → Hardware decoding* and restart the app
-to use the system video decoder when available. Results depend on the video,
-resolution and hardware.
 
 ## Screenshots
 
@@ -190,6 +181,9 @@ release comes out (*Settings → About*).
 To run it without installing, choose *Extract All* on
 `StreamTube-<version>-windows-x64.zip`, then open `streamtube.exe` in the extracted
 folder with `libmpv-2.dll` beside it. It doesn't need the Visual C++ runtime.
+After you extract a build with portable update support, use *Settings → About*
+for future updates. Stream Tube replaces the app files in that folder and
+restarts with the same settings and history.
 Older PCs whose graphics driver has no Vulkan support (for example Intel HD 4000)
 work too: the app carries its own Vulkan loader for libmpv and uses it only when
 Windows doesn't have one.
@@ -197,21 +191,21 @@ Windows doesn't have one.
 **Debian, Ubuntu, Mint**: install the `.deb`. This also installs libmpv:
 
 ```sh
-sudo apt install ./streamtube_0.7.5-alpha_amd64.deb
+sudo apt install ./streamtube_0.7.7-alpha_amd64.deb
 ```
 
 **Fedora, openSUSE**: install the `.rpm`:
 
 ```sh
-sudo dnf install ./streamtube-0.7.5-alpha.x86_64.rpm
+sudo dnf install ./streamtube-0.7.7-alpha.x86_64.rpm
 ```
 
 **Any Linux (x86_64), nothing to install**: download the AppImage, make it executable
 and run it. libmpv is inside, so video plays without installing anything else:
 
 ```sh
-chmod +x StreamTube-0.7.5-alpha-x86_64.AppImage
-./StreamTube-0.7.5-alpha-x86_64.AppImage
+chmod +x StreamTube-0.7.7-alpha-x86_64.AppImage
+./StreamTube-0.7.7-alpha-x86_64.AppImage
 ```
 
 **Other Linux (x86_64), installed for your user**: unpack `StreamTube-<version>-linux-x86_64.tar.gz` and run
@@ -253,7 +247,7 @@ and each file has a signed build provenance attestation that ties it to the work
 run that built it. With the [GitHub CLI](https://cli.github.com):
 
 ```sh
-gh attestation verify StreamTube-0.7.5-alpha-setup.exe --repo Avaneesh-Inamdar/Stream-Tube-Desktop
+gh attestation verify StreamTube-0.7.7-alpha-setup.exe --repo Avaneesh-Inamdar/Stream-Tube-Desktop
 ```
 
 Check a download against those before running it. The in-app updater also checks
@@ -285,7 +279,7 @@ else, copy `libmpv-2.dll` next to it.
 To build the installer, install [Inno Setup 6](https://jrsoftware.org/isinfo.php) and run:
 
 ```powershell
-ISCC.exe /DAppVersion=0.7.5-alpha installer\streamtube.iss
+ISCC.exe /DAppVersion=0.7.7-alpha installer\streamtube.iss
 ```
 
 It lands in `dist\`. On Linux, install the packages listed in
@@ -389,9 +383,9 @@ src/
 
 ## Known issues
 
-- YouTube sometimes answers with "Sign in to confirm you're not a bot". When that
-  happens, signing in inside the app or updating yt-dlp usually fixes it.
-- Windows is the main platform. The Linux build is new and less tested. macOS has a local build path.
+- YouTube sometimes answers with "Sign in to confirm you're not a bot". Signing in
+  inside the app avoids it; otherwise updating yt-dlp usually fixes it.
+- Windows is the main platform. The Linux build is new and less tested; macOS has a local build path.
 
 ## Contributing
 

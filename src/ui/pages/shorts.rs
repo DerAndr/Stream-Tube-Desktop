@@ -3,12 +3,12 @@ use crate::i18n::t;
 use crate::api::json::compact_number;
 use crate::api::services;
 use crate::api::types::*;
-use crate::player::controller::{PlayerEvent, player};
+use crate::player::controller::{Player, PlayerEvent, player};
 use crate::store;
 use crate::ui::app::{Route, UiState, navigate};
 use crate::ui::*;
-use crate::ui::pages::watch::{reply_parents, thread_branch};
-use crate::ui::widgets::{Load, comment_body};
+use crate::ui::pages::watch::{reply_count_label, reply_parents, thread_branch};
+use crate::ui::widgets::{Load, comment_body, has_text_selection, selectable_text};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
@@ -21,6 +21,7 @@ struct ShortSlide {
 }
 
 pub struct ShortsPage {
+    player: Entity<Player>,
     list: Vec<VideoItem>,
     idx: usize,
     loading: bool,
@@ -50,7 +51,8 @@ pub struct ShortsPage {
 
 impl ShortsPage {
     pub fn new(start: Option<String>, _window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let sub = cx.subscribe(&player(cx), |this: &mut Self, pl, ev: &PlayerEvent, cx| {
+        let playback = player(cx);
+        let sub = cx.subscribe(&playback, |this: &mut Self, pl, ev: &PlayerEvent, cx| {
             if matches!(ev, PlayerEvent::Loaded) {
                 if let Some(short) = this.list.get_mut(this.idx).filter(|v| v.title.trim().is_empty()) {
                     if let Some(video) = pl.read(cx).video.as_ref().filter(|v| v.id == short.id && !v.title.trim().is_empty()) {
@@ -71,10 +73,11 @@ impl ShortsPage {
         cx.on_release(|this, cx| {
             this.clear_slide(None, cx);
             let l = store::settings_snapshot().loop_video;
-            player(cx).update(cx, |p, _| p.set_loop(l));
+            this.player.update(cx, |p, _| p.set_loop(l));
         })
         .detach();
         let mut s = Self {
+            player: playback,
             list: Vec::new(),
             idx: 0,
             loading: true,
@@ -168,7 +171,7 @@ impl ShortsPage {
         self.initial_play = false;
         let Some(mut v) = self.list.get(self.idx).cloned() else { return };
         v.is_short = true;
-        let pl = player(cx);
+        let pl = self.player.clone();
         pl.update(cx, |p, cx| {
             p.queue.clear();
             p.queue_pos = None;
@@ -444,7 +447,7 @@ impl ShortsPage {
                 .font_weight(FontWeight::MEDIUM)
                 .cursor_pointer()
                 .child(icon(if open { "chevron-up" } else { "chevron-down" }).size_4().text_color(p.link))
-                .child(format!("{} {}", c.reply_count, if c.reply_count == "1" { "reply" } else { "replies" }))
+                .child(reply_count_label(&c.reply_count))
                 .on_click(cx.listener(move |t, _, _, cx| {
                     if t.replies.remove(&cid2).is_some() {
                         cx.notify();
@@ -723,7 +726,12 @@ impl Render for ShortsPage {
         let h = if below { available_h - caption_h } else { available_h };
         let w = (h * (9. / 16.)).min(ui.viewport.width);
         let title = |color: Hsla| {
-            div().min_w_0().text_base().font_weight(FontWeight::SEMIBOLD).text_color(color).line_clamp(if below { 2 } else { 4 }).child(v.title.clone())
+            selectable_text(SharedString::from(format!("shorts-title-{}", v.id)), v.title.clone())
+                .min_w_0()
+                .text_base()
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(color)
+                .line_clamp(if below { 2 } else { 4 })
         };
         let video_column = |video: Div| {
             div().w(w).min_w_0().flex().flex_col().child(video).when(below, |d| {
@@ -732,8 +740,14 @@ impl Render for ShortsPage {
                         .child(title(if fullscreen { white() } else { p.text }))
                         .when(compact_channel, |d| {
                             let channel = v.channel_id.clone();
-                            d.child(div().id("shorts-caption-channel").text_xs().text_color(p.text2).truncate().child(v.channel_name.clone())
-                                .when_some(channel, |d, id| d.cursor_pointer().on_click(move |_, window, cx| navigate(Route::Channel(id.clone()), window, cx))))
+                            d.child(div().id("shorts-caption-channel").text_xs().text_color(p.text2).truncate()
+                                .child(gpui_kit::base::SelectableText::new(SharedString::from(format!("sh-ch-cap-{}", v.id)), v.channel_name.clone()))
+                                .when_some(channel, |d, id| d.cursor_pointer().on_click(move |_, window, cx| {
+                                    if has_text_selection(window, cx) {
+                                        return;
+                                    }
+                                    navigate(Route::Channel(id.clone()), window, cx)
+                                })))
                         }),
                 )
             })
@@ -840,7 +854,7 @@ impl Render for ShortsPage {
                         description: None,
                     })
                 });
-            let subs_text = ch.as_ref().and_then(|c| c.subscribers_text.clone()).filter(|s| !s.is_empty());
+            let subs_text = ch.as_ref().and_then(|c| c.subscribers_text.clone()).filter(|s| !s.is_empty() && !store::settings_snapshot().hide_subscriber_counts);
             let sub_btn = if show_subscribe {
                 ch.as_ref().map(|c| crate::ui::cards::subscribe_button("sh-sub".into(), c, store::is_subscribed(&c.id), cx))
             } else {
@@ -867,6 +881,9 @@ impl Render for ShortsPage {
                         .gap_2()
                         .cursor_pointer()
                         .on_click(move |_, window, cx| {
+                            if has_text_selection(window, cx) {
+                                return;
+                            }
                             if let Some(c) = cid_yt.clone() {
                                 navigate(Route::Channel(c), window, cx);
                             }
@@ -877,13 +894,20 @@ impl Render for ShortsPage {
                                 .flex()
                                 .flex_col()
                                 .min_w_0()
-                                .child(div().text_sm().font_weight(FontWeight::SEMIBOLD).text_color(p.text).truncate().child(v.channel_name.clone()))
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(p.text)
+                                        .truncate()
+                                        .child(gpui_kit::base::SelectableText::new(SharedString::from(format!("sh-ch-name-{}", v.id)), v.channel_name.clone())),
+                                )
                                 .when_some(subs_text, |d, t| d.child(div().text_xs().text_color(p.text2).truncate().child(t))),
                         ),
                 )
                 .when_some(sub_btn, |d, btn| d.child(div().flex().items_center().child(btn)))
                 .child(title(p.text))
-                .when_some(meta_line, |d, t| d.child(div().text_xs().text_color(p.text2).child(t)))
+                .when_some(meta_line, |d, t| d.child(selectable_text(SharedString::from(format!("sh-meta-{}", v.id)), t).text_xs().text_color(p.text2)))
         });
         div()
             .id("shorts")
